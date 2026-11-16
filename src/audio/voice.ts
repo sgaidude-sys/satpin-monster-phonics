@@ -252,39 +252,84 @@ function synthPhoneme(ctx: AudioContext, letter: SatpinLetter, t: number, dest: 
 }
 
 /* ================================================================== */
-/*  Recorded-file override                                             */
+/*  Neural voice clips, pre-rendered by scripts/make_voice.py           */
+/*  Sounds & words: clear British teacher voice. Lines: Munchy's voice. */
 /* ================================================================== */
+
+export const LINE_TEXT = {
+  intro: "Hi! I'm Munchy! I'm so hungry for sounds! Tap the glowing circle to play!",
+  mode_feed: 'Feed me the card with my sound!',
+  mode_bubble: 'Pop the bubbles with my sound!',
+  mode_egg: 'Find the egg with my sound. Then tap, tap, tap!',
+  yummy: 'Yummy!',
+  great: 'Great listening!',
+  yougotit: 'You got it!',
+  oops: 'Oops! Try again!',
+  notthat: 'Hmm, not that one!',
+  excuse: 'Oh! Excuse me!',
+  didit: 'You did it!',
+  chest: 'Tap the treasure chest!',
+  fancy: 'Ooh, fancy!',
+  loveit: 'I love it!',
+  letsgo: "Let's go!",
+  superstar: 'Wow! You are a sound superstar!',
+  giggle: 'Hee hee! That tickles!',
+  locked: 'Finish the glowing one first!',
+  newhat: 'A new hat for me!',
+  newsticker: 'A new sticker!',
+} as const;
+
+export type LineKey = keyof typeof LINE_TEXT;
 
 const missing = new Set<string>();
 const buffers = new Map<string, AudioBuffer>();
+const pending = new Map<string, Promise<AudioBuffer | null>>();
 
-async function loadRecording(ctx: AudioContext, letter: SatpinLetter): Promise<AudioBuffer | null> {
-  const url = `/audio/${letter}.mp3`;
-  if (missing.has(url)) return null;
+function loadClip(url: string): Promise<AudioBuffer | null> {
+  const ctx = engine.ensure();
+  if (!ctx || missing.has(url)) return Promise.resolve(null);
   const cached = buffers.get(url);
-  if (cached) return cached;
-  try {
-    const res = await fetch(url);
-    const type = res.headers.get('content-type') || '';
-    if (!res.ok || type.includes('text/html')) throw new Error('missing');
-    const buf = await ctx.decodeAudioData(await res.arrayBuffer());
-    buffers.set(url, buf);
-    return buf;
-  } catch {
-    missing.add(url);
-    return null;
+  if (cached) return Promise.resolve(cached);
+  let p = pending.get(url);
+  if (!p) {
+    p = (async () => {
+      try {
+        const res = await fetch(url);
+        const type = res.headers.get('content-type') || '';
+        if (!res.ok || type.includes('text/html')) throw new Error('missing');
+        const buf = await ctx.decodeAudioData(await res.arrayBuffer());
+        buffers.set(url, buf);
+        return buf;
+      } catch {
+        missing.add(url);
+        return null;
+      } finally {
+        pending.delete(url);
+      }
+    })();
+    pending.set(url, p);
   }
+  return p;
 }
 
+const phonemeUrl = (l: SatpinLetter) => `/audio/${l}.mp3`;
+const wordUrl = (l: SatpinLetter) => `/audio/words/${SATPIN_ITEMS[l].word}.mp3`;
+const likeUrl = (l: SatpinLetter) => `/audio/words/like_${SATPIN_ITEMS[l].word}.mp3`;
+const lineUrl = (k: LineKey) => `/audio/lines/${k}.mp3`;
+
 /** Kick off background loads so the first play has no delay. */
-export function preloadRecordings(): void {
-  const ctx = engine.ensure();
-  if (!ctx) return;
-  (Object.keys(SATPIN_ITEMS) as SatpinLetter[]).forEach((l) => void loadRecording(ctx, l));
+export function preloadVoice(): void {
+  if (!engine.ensure()) return;
+  (Object.keys(SATPIN_ITEMS) as SatpinLetter[]).forEach((l) => {
+    void loadClip(phonemeUrl(l));
+    void loadClip(wordUrl(l));
+    void loadClip(likeUrl(l));
+  });
+  (Object.keys(LINE_TEXT) as LineKey[]).forEach((k) => void loadClip(lineUrl(k)));
 }
 
 /* ================================================================== */
-/*  Narrator (device speech voice) for words & praise                  */
+/*  Device speech fallback                                             */
 /* ================================================================== */
 
 let narratorVoice: SpeechSynthesisVoice | null = null;
@@ -365,17 +410,14 @@ export function stopSpeech(): void {
   narratorSpeaking = false;
 }
 
+
 /* ================================================================== */
 /*  Public API                                                         */
 /* ================================================================== */
 
 let activeSource: AudioBufferSourceNode | null = null;
 
-/** Plays the pure letter sound. Resolves when finished. */
-export async function playPhoneme(letter: SatpinLetter): Promise<void> {
-  const ctx = engine.ensure();
-  if (!ctx) return;
-  stopSpeech();
+function stopClip(): void {
   if (activeSource) {
     try {
       activeSource.stop();
@@ -384,21 +426,66 @@ export async function playPhoneme(letter: SatpinLetter): Promise<void> {
     }
     activeSource = null;
   }
+}
+
+async function playBuffer(buf: AudioBuffer): Promise<void> {
+  const ctx = engine.ctx!;
+  stopSpeech();
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(engine.voice);
+  activeSource = src;
   engine.duck(true);
-  const rec = await loadRecording(ctx, letter);
-  let dur: number;
-  if (rec) {
-    const src = ctx.createBufferSource();
-    src.buffer = rec;
-    src.connect(engine.voice);
-    src.start();
-    activeSource = src;
-    dur = rec.duration;
-  } else {
-    dur = synthPhoneme(ctx, letter, ctx.currentTime + 0.02, engine.voice);
-  }
+  src.start();
+  await new Promise<void>((r) => {
+    src.onended = () => r();
+    setTimeout(r, buf.duration * 1000 + 400);
+  });
+  if (activeSource === src) activeSource = null;
+  engine.duck(false);
+}
+
+/** Plays the pure letter sound. Resolves when finished. */
+export async function playPhoneme(letter: SatpinLetter): Promise<void> {
+  const ctx = engine.ensure();
+  if (!ctx) return;
+  const buf = await loadClip(phonemeUrl(letter));
+  if (buf) return playBuffer(buf);
+  stopSpeech();
+  engine.duck(true);
+  const dur = synthPhoneme(ctx, letter, ctx.currentTime + 0.02, engine.voice);
   await new Promise((r) => setTimeout(r, dur * 1000 + 80));
   engine.duck(false);
+}
+
+/** "snake!" — the keyword for a letter. */
+export async function sayWord(letter: SatpinLetter): Promise<void> {
+  if (!engine.settings.narrator) return;
+  const buf = await loadClip(wordUrl(letter));
+  if (buf) return playBuffer(buf);
+  return say(`${SATPIN_ITEMS[letter].word}!`, { pitch: 1.2 });
+}
+
+/** "like snake" — scaffolding hint. */
+export async function sayLike(letter: SatpinLetter): Promise<void> {
+  if (!engine.settings.narrator) return;
+  const buf = await loadClip(likeUrl(letter));
+  if (buf) return playBuffer(buf);
+  return say(`like ${SATPIN_ITEMS[letter].word}`, { rate: 0.9 });
+}
+
+/** One of Munchy's spoken lines. */
+export async function sayLine(key: LineKey): Promise<void> {
+  if (!engine.settings.narrator) return;
+  const buf = await loadClip(lineUrl(key));
+  if (buf) return playBuffer(buf);
+  return say(LINE_TEXT[key], { pitch: 1.25 });
+}
+
+/** Stops every voice that is playing. */
+export function stopVoice(): void {
+  stopClip();
+  stopSpeech();
 }
 
 /** Renders a phoneme offline – used to sanity-check levels in development. */

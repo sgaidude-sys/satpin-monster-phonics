@@ -414,3 +414,176 @@ export function sfxStart(): void {
   bell(midiToHz(88), t + 0.4, 0.12, 1.5, 0.5);
   sfxSparkle(t + 0.42, 0.8);
 }
+
+/* ------------------------------------------------------------------ */
+/*  Adventure expansion                                                */
+/* ------------------------------------------------------------------ */
+
+/** A big silly burp. Four-year-olds' favourite sound. */
+export function sfxBurp(): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const dur = 0.7;
+  const osc = ctx.createOscillator();
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(105, t);
+  osc.frequency.linearRampToValueAtTime(128, t + 0.12);
+  osc.frequency.exponentialRampToValueAtTime(68, t + dur);
+  // Rough, gurgly amplitude modulation
+  const am = ctx.createOscillator();
+  const amGain = ctx.createGain();
+  am.type = 'square';
+  am.frequency.setValueAtTime(34, t);
+  am.frequency.linearRampToValueAtTime(22, t + dur);
+  amGain.gain.value = 0.5;
+  const vca = ctx.createGain();
+  vca.gain.value = 0.5;
+  am.connect(amGain).connect(vca.gain);
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(900, t);
+  lp.frequency.exponentialRampToValueAtTime(350, t + dur);
+  lp.Q.value = 4;
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0.0001, t);
+  env.gain.linearRampToValueAtTime(0.6, t + 0.04);
+  env.gain.setValueAtTime(0.55, t + dur * 0.6);
+  env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(vca).connect(lp).connect(env).connect(engine.sfx);
+  osc.start(t);
+  am.start(t);
+  osc.stop(t + dur + 0.05);
+  am.stop(t + dur + 0.05);
+  noise({ t, dur: dur * 0.9, gain: 0.08, freq: 500, q: 1.5, attack: 0.03 });
+}
+
+/** Bubble pop — pitch climbs with each pop. */
+export function sfxBubblePop(pitch = 1): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  tone({ freq: 500 * pitch, freqEnd: 1500 * pitch, glide: 0.04, t, dur: 0.08, gain: 0.3, attack: 0.001 });
+  noise({ t, dur: 0.03, gain: 0.12, type: 'highpass', freq: 3000, q: 0.7 });
+  bell(midiToHz(84 + Math.round((pitch - 1) * 12)), t + 0.03, 0.06, 0.5, 0.35);
+}
+
+/** Rubbery "boop" when tapping a wrong bubble. */
+export function sfxBonk(): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  tone({ freq: 340, freqEnd: 190, glide: 0.18, t, dur: 0.22, gain: 0.22, type: 'triangle', filter: 1400 });
+}
+
+/** Eggshell crack — bigger with each stage. */
+export function sfxCrack(stage: number): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const n = 2 + stage;
+  for (let i = 0; i < n; i++) {
+    noise({ t: t + i * 0.025, dur: 0.035, gain: 0.25 + stage * 0.05, freq: 3200 + Math.random() * 2000, q: 2.5, attack: 0.001 });
+  }
+  tone({ freq: 260 + stage * 40, freqEnd: 120, glide: 0.06, t, dur: 0.08, gain: 0.25 });
+}
+
+/** Hatching: pop + happy rising arpeggio. */
+export function sfxHatch(): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  noise({ t, dur: 0.12, gain: 0.35, freq: 2500, q: 1, attack: 0.002 });
+  tone({ freq: 300, freqEnd: 900, glide: 0.12, t, dur: 0.18, gain: 0.25 });
+  [72, 76, 79, 84, 88].forEach((m, i) => marimba(midiToHz(m), t + 0.08 + i * 0.06, 0.14, 0.5, 0.3));
+  sfxSparkle(t + 0.3, 0.7);
+}
+
+/** Wooden treasure chest rattle. */
+export function sfxChestShake(): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  for (let i = 0; i < 4; i++) {
+    noise({ t: t + i * 0.06, dur: 0.05, gain: 0.25, freq: 700 + Math.random() * 400, q: 3, attack: 0.002 });
+    tone({ freq: 140, freqEnd: 90, t: t + i * 0.06, dur: 0.06, gain: 0.18 });
+  }
+  bell(midiToHz(91), t + 0.1, 0.05, 0.4, 0.4);
+}
+
+/** Chest bursts open. */
+export function sfxChestOpen(): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  noise({ t, dur: 0.6, gain: 0.25, freq: 400, freqEnd: 5000, q: 1.2, attack: 0.4, reverb: 0.3 });
+  tone({ freq: 110, freqEnd: 50, glide: 0.3, t: t + 0.4, dur: 0.4, gain: 0.45 });
+  [60, 64, 67, 72].forEach((m) => bell(midiToHz(m + 12), t + 0.42, 0.1, 1.8, 0.5));
+  sfxSparkle(t + 0.45, 1.6);
+}
+
+/** One star awarded on the results screen. */
+export function sfxStarAward(i: number): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const n = [76, 79, 84][Math.min(2, i)];
+  bell(midiToHz(n), t, 0.22, 1.4, 0.45);
+  bell(midiToHz(n + 12), t + 0.05, 0.08, 1, 0.5);
+  tone({ freq: 90, freqEnd: 50, t, dur: 0.25, gain: 0.3 });
+}
+
+/** Little hop on the map. */
+export function sfxHop(i = 0): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  tone({ freq: 300 + i * 40, freqEnd: 700 + i * 60, glide: 0.1, t, dur: 0.14, gain: 0.16 });
+  tone({ freq: 160, freqEnd: 70, t: t + 0.22, dur: 0.07, gain: 0.2 });
+}
+
+/** A new level node unlocks on the map. */
+export function sfxUnlock(): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  [67, 71, 74, 79, 83, 86].forEach((m, i) => bell(midiToHz(m), t + i * 0.05, 0.08, 0.9, 0.5, (i - 2.5) * 0.25));
+}
+
+/** "Ta-da!" when Munchy puts on a hat. */
+export function sfxWear(): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  marimba(midiToHz(72), t, 0.18, 0.3, 0.2);
+  marimba(midiToHz(79), t + 0.12, 0.18, 0.6, 0.25);
+  bell(midiToHz(91), t + 0.12, 0.08, 1, 0.5);
+  sfxSparkle(t + 0.15, 0.6);
+}
+
+/** Spin whoosh when Munchy twirls. */
+export function sfxSpin(): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  noise({ t, dur: 0.5, gain: 0.18, freq: 600, freqEnd: 3000, q: 4, attack: 0.2 });
+  tone({ freq: 400, freqEnd: 1200, glide: 0.45, t, dur: 0.5, gain: 0.08, type: 'triangle' });
+}
+
+/** Rubber squish when Munchy is squeezed. */
+export function sfxSquish(): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  tone({ freq: 180, freqEnd: 520, glide: 0.18, t, dur: 0.25, gain: 0.22, type: 'triangle', filter: 1600 });
+  noise({ t, dur: 0.15, gain: 0.08, freq: 900, q: 3 });
+}
+
+/** Tiny chomp when a bubble letter reaches Munchy. */
+export function sfxNom(): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  tone({ freq: 170, freqEnd: 70, glide: 0.06, t, dur: 0.09, gain: 0.35 });
+  noise({ t, dur: 0.07, gain: 0.2, freq: 1500, q: 1 });
+}

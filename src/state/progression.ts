@@ -1,12 +1,8 @@
-import {
-  ANIMAL_STICKERS,
-  SATPIN_LETTERS,
-  type AnimalSticker,
-  type SatpinLetter,
-} from '../data/phonics';
+import { ANIMAL_STICKERS, SATPIN_LETTERS, type AnimalSticker, type SatpinLetter } from '../data/phonics';
+import { HATS, LEVELS, type HatDef } from '../data/levels';
 
-const STORAGE_KEY = 'monster_phonics_satpin_v1';
-export const ROUNDS_PER_CELEBRATION = 5;
+const STORAGE_KEY = 'munchy_phonics_v2';
+const LEGACY_KEY = 'monster_phonics_satpin_v1';
 export const MASTERY_TARGET = 5;
 
 export interface LetterMastery {
@@ -17,167 +13,180 @@ export interface LetterMastery {
 
 export interface ProgressionState {
   mastery: Record<SatpinLetter, LetterMastery>;
-  roundProgress: number; // 0..4, reaches 5 to trigger celebration & resets to 0
-  totalRoundsWon: number;
-  unlockedStickers: string[];
+  /** Best stars (0-3) per level; 0 = not finished yet */
+  levelStars: number[];
+  /** Highest level index the player may enter */
+  unlockedLevel: number;
+  stickers: string[];
+  hats: string[];
+  equippedHat: string | null;
+  prizesGiven: number;
+  totalCorrect: number;
+  metMunchy: boolean;
 }
 
-function createInitialMastery(): Record<SatpinLetter, LetterMastery> {
+export type Prize = { kind: 'hat'; hat: HatDef } | { kind: 'sticker'; sticker: AnimalSticker };
+
+function freshMastery(): Record<SatpinLetter, LetterMastery> {
+  const m = {} as Record<SatpinLetter, LetterMastery>;
+  for (const l of SATPIN_LETTERS) m[l] = { attempts: 0, correct: 0, streak: 0 };
+  return m;
+}
+
+function fresh(): ProgressionState {
   return {
-    s: { attempts: 0, correct: 0, streak: 0 },
-    a: { attempts: 0, correct: 0, streak: 0 },
-    t: { attempts: 0, correct: 0, streak: 0 },
-    p: { attempts: 0, correct: 0, streak: 0 },
-    i: { attempts: 0, correct: 0, streak: 0 },
-    n: { attempts: 0, correct: 0, streak: 0 },
+    mastery: freshMastery(),
+    levelStars: LEVELS.map(() => 0),
+    unlockedLevel: 0,
+    stickers: [],
+    hats: [],
+    equippedHat: null,
+    prizesGiven: 0,
+    totalCorrect: 0,
+    metMunchy: false,
   };
 }
+
+function readMastery(src: unknown): Record<SatpinLetter, LetterMastery> {
+  const mastery = freshMastery();
+  const obj = (src ?? {}) as Record<string, Partial<LetterMastery>>;
+  for (const l of SATPIN_LETTERS) {
+    const m = obj[l];
+    if (m && typeof m.correct === 'number' && typeof m.attempts === 'number') {
+      mastery[l] = { attempts: Math.max(0, m.attempts), correct: Math.max(0, m.correct), streak: Math.max(0, m.streak ?? 0) };
+    }
+  }
+  return mastery;
+}
+
+const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
 export function loadProgression(): ProgressionState {
-  const fallback: ProgressionState = {
-    mastery: createInitialMastery(),
-    roundProgress: 0,
-    totalRoundsWon: 0,
-    unlockedStickers: [],
-  };
-
+  const base = fresh();
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw) as Partial<ProgressionState>;
-    const mastery = createInitialMastery();
-    for (const letter of SATPIN_LETTERS) {
-      const m = parsed.mastery?.[letter];
-      if (m && typeof m.correct === 'number' && typeof m.attempts === 'number') {
-        mastery[letter] = {
-          attempts: Math.max(0, m.attempts),
-          correct: Math.max(0, m.correct),
-          streak: Math.max(0, m.streak ?? 0),
-        };
-      }
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<ProgressionState>;
+      const stars = Array.isArray(p.levelStars) ? p.levelStars : [];
+      return {
+        mastery: readMastery(p.mastery),
+        levelStars: LEVELS.map((_, i) => Math.max(0, Math.min(3, Number(stars[i]) || 0))),
+        unlockedLevel: Math.max(0, Math.min(LEVELS.length - 1, Number(p.unlockedLevel) || 0)),
+        stickers: strings(p.stickers).filter((id) => ANIMAL_STICKERS.some((s) => s.id === id)),
+        hats: strings(p.hats).filter((id) => HATS.some((h) => h.id === id)),
+        equippedHat: typeof p.equippedHat === 'string' ? p.equippedHat : null,
+        prizesGiven: Math.max(0, Number(p.prizesGiven) || 0),
+        totalCorrect: Math.max(0, Number(p.totalCorrect) || 0),
+        metMunchy: !!p.metMunchy,
+      };
     }
-    return {
-      mastery,
-      roundProgress:
-        typeof parsed.roundProgress === 'number'
-          ? parsed.roundProgress % ROUNDS_PER_CELEBRATION
-          : 0,
-      totalRoundsWon:
-        typeof parsed.totalRoundsWon === 'number' ? Math.max(0, parsed.totalRoundsWon) : 0,
-      unlockedStickers: Array.isArray(parsed.unlockedStickers)
-        ? parsed.unlockedStickers.filter((id): id is string => typeof id === 'string')
-        : [],
-    };
+    // Carry over letter progress and stickers from the first version
+    const legacy = localStorage.getItem(LEGACY_KEY);
+    if (legacy) {
+      const p = JSON.parse(legacy) as { mastery?: unknown; unlockedStickers?: unknown };
+      base.mastery = readMastery(p.mastery);
+      base.stickers = strings(p.unlockedStickers);
+    }
   } catch {
-    return fallback;
+    /* fall through */
   }
-}
-
-export function resetProgression(): ProgressionState {
-  const fresh: ProgressionState = {
-    mastery: createInitialMastery(),
-    roundProgress: 0,
-    totalRoundsWon: 0,
-    unlockedStickers: [],
-  };
-  saveProgression(fresh);
-  return fresh;
+  return base;
 }
 
 export function saveProgression(state: ProgressionState): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
-    // Ignore storage quota errors
+    /* ignore quota errors */
   }
 }
 
-export function recordAttempt(
-  state: ProgressionState,
-  letter: SatpinLetter,
-  isCorrect: boolean
-): {
-  nextState: ProgressionState;
-  triggeredCelebration: boolean;
-  unlockedSticker: AnimalSticker | null;
-} {
-  const current = state.mastery[letter];
-  const updatedLetter: LetterMastery = {
-    attempts: current.attempts + 1,
-    correct: current.correct + (isCorrect ? 1 : 0),
-    streak: isCorrect ? current.streak + 1 : 0,
-  };
-
-  const nextMastery = {
-    ...state.mastery,
-    [letter]: updatedLetter,
-  };
-
-  if (!isCorrect) {
-    const nextState: ProgressionState = {
-      ...state,
-      mastery: nextMastery,
-    };
-    saveProgression(nextState);
-    return { nextState, triggeredCelebration: false, unlockedSticker: null };
-  }
-
-  const nextRoundCount = state.roundProgress + 1;
-  const triggeredCelebration = nextRoundCount >= ROUNDS_PER_CELEBRATION;
-  let unlockedSticker: AnimalSticker | null = null;
-  let nextStickers = state.unlockedStickers;
-
-  if (triggeredCelebration) {
-    const locked = ANIMAL_STICKERS.filter((s) => !state.unlockedStickers.includes(s.id));
-    if (locked.length > 0) {
-      unlockedSticker = locked[Math.floor(Math.random() * locked.length)];
-      nextStickers = [...state.unlockedStickers, unlockedSticker.id];
-    } else {
-      // All stickers collected — celebrate with a random favorite!
-      unlockedSticker = ANIMAL_STICKERS[Math.floor(Math.random() * ANIMAL_STICKERS.length)];
-    }
-  }
-
-  const nextState: ProgressionState = {
-    mastery: nextMastery,
-    roundProgress: triggeredCelebration ? 0 : nextRoundCount,
-    totalRoundsWon: state.totalRoundsWon + 1,
-    unlockedStickers: nextStickers,
-  };
-
-  saveProgression(nextState);
-  return { nextState, triggeredCelebration, unlockedSticker };
+export function resetProgression(): ProgressionState {
+  const s = fresh();
+  s.metMunchy = true;
+  saveProgression(s);
+  return s;
 }
 
-export function pickNextTargetLetter(
+export function update(state: ProgressionState, patch: Partial<ProgressionState>): ProgressionState {
+  const next = { ...state, ...patch };
+  saveProgression(next);
+  return next;
+}
+
+export function recordAttempt(state: ProgressionState, letter: SatpinLetter, correct: boolean): ProgressionState {
+  const cur = state.mastery[letter];
+  return update(state, {
+    mastery: {
+      ...state.mastery,
+      [letter]: {
+        attempts: cur.attempts + 1,
+        correct: cur.correct + (correct ? 1 : 0),
+        streak: correct ? cur.streak + 1 : 0,
+      },
+    },
+    totalCorrect: state.totalCorrect + (correct ? 1 : 0),
+  });
+}
+
+export function completeLevel(
   state: ProgressionState,
-  previousLetter?: SatpinLetter
-): SatpinLetter {
-  const candidates = SATPIN_LETTERS.filter((l) => l !== previousLetter);
-  // Gently weight toward letters with fewer correct answers
+  index: number,
+  stars: number
+): { state: ProgressionState; prize: Prize | null; unlockedNew: boolean } {
+  const levelStars = [...state.levelStars];
+  levelStars[index] = Math.max(levelStars[index], stars);
+  const nextUnlocked = Math.min(LEVELS.length - 1, Math.max(state.unlockedLevel, index + 1));
+  const unlockedNew = nextUnlocked > state.unlockedLevel;
+
+  const lockedHats = HATS.filter((h) => !state.hats.includes(h.id));
+  const lockedStickers = ANIMAL_STICKERS.filter((s) => !state.stickers.includes(s.id));
+  let prize: Prize | null = null;
+  const wantHat = state.prizesGiven % 2 === 0;
+  if ((wantHat && lockedHats.length) || (!lockedStickers.length && lockedHats.length)) {
+    prize = { kind: 'hat', hat: lockedHats[0] };
+  } else if (lockedStickers.length) {
+    prize = { kind: 'sticker', sticker: lockedStickers[Math.floor(Math.random() * lockedStickers.length)] };
+  }
+
+  const next = update(state, {
+    levelStars,
+    unlockedLevel: nextUnlocked,
+    hats: prize?.kind === 'hat' ? [...state.hats, prize.hat.id] : state.hats,
+    stickers: prize?.kind === 'sticker' ? [...state.stickers, prize.sticker.id] : state.stickers,
+    prizesGiven: state.prizesGiven + (prize ? 1 : 0),
+  });
+  return { state: next, prize, unlockedNew };
+}
+
+export function totalStars(state: ProgressionState): number {
+  return state.levelStars.reduce((a, b) => a + b, 0);
+}
+
+/** Picks the next sound, gently favouring letters the child knows least. */
+export function pickTarget(state: ProgressionState, letters: SatpinLetter[], previous?: SatpinLetter): SatpinLetter {
+  const pool = letters.length > 1 ? letters.filter((l) => l !== previous) : letters;
   const weighted: SatpinLetter[] = [];
-  for (const letter of candidates) {
-    const correct = state.mastery[letter].correct;
-    const weight = Math.max(1, MASTERY_TARGET + 1 - Math.min(MASTERY_TARGET, correct));
-    for (let i = 0; i < weight; i++) {
-      weighted.push(letter);
-    }
+  for (const l of pool) {
+    const w = Math.max(1, MASTERY_TARGET + 1 - Math.min(MASTERY_TARGET, state.mastery[l].correct));
+    for (let i = 0; i < w; i++) weighted.push(l);
   }
   return weighted[Math.floor(Math.random() * weighted.length)];
 }
 
-export function pickRoundChoices(target: SatpinLetter): SatpinLetter[] {
-  const others = SATPIN_LETTERS.filter((l) => l !== target);
-  // Shuffle others
-  for (let i = others.length - 1; i > 0; i--) {
+export function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [others[i], others[j]] = [others[j], others[i]];
+    [a[i], a[j]] = [a[j], a[i]];
   }
-  const choices = [target, others[0], others[1]];
-  // Shuffle final 3 choices
-  for (let i = choices.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [choices[i], choices[j]] = [choices[j], choices[i]];
+  return a;
+}
+
+export function pickChoices(target: SatpinLetter, letters: SatpinLetter[], count = 3): SatpinLetter[] {
+  let others = shuffle(letters.filter((l) => l !== target));
+  if (others.length < count - 1) {
+    others = [...others, ...shuffle(SATPIN_LETTERS.filter((l) => l !== target && !others.includes(l)))];
   }
-  return choices;
+  return shuffle([target, ...others.slice(0, count - 1)]);
 }

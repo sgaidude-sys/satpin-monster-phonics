@@ -5,8 +5,12 @@
  * stretch, hops, chewing, gulping and a wobbly hair tuft.
  */
 
+import { drawHat, hatHidesTuft } from './hats';
+
 export type MonsterMood =
   | 'idle'
+  | 'burp'
+  | 'dance'
   | 'speaking'
   | 'happy'
   | 'yuck'
@@ -89,20 +93,24 @@ export class MonsterCanvasController {
   private mouthScreen = { x: 0, y: 0 };
   private eyeScreen = { x: 0, y: 0 };
   private unit = 100;
+  private hat: string | null = null;
+  private spinT = 0;
+  private ro: ResizeObserver;
+  private onPointer = (e: PointerEvent) => {
+    this.pointer.x = e.clientX;
+    this.pointer.y = e.clientY;
+    this.pointer.at = this.time;
+  };
 
   constructor(canvas: HTMLCanvasElement, opts: Options = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
     this.opts = opts;
     this.mood = opts.idleMood ?? 'idle';
-    const ro = new ResizeObserver(() => this.resize());
-    ro.observe(canvas);
+    this.ro = new ResizeObserver(() => this.resize());
+    this.ro.observe(canvas);
     this.resize();
-    window.addEventListener('pointermove', (e) => {
-      this.pointer.x = e.clientX;
-      this.pointer.y = e.clientY;
-      this.pointer.at = this.time;
-    });
+    window.addEventListener('pointermove', this.onPointer);
     this.last = performance.now();
     requestAnimationFrame(this.loop);
   }
@@ -119,6 +127,27 @@ export class MonsterCanvasController {
       this.last = performance.now();
       requestAnimationFrame(this.loop);
     }
+  }
+
+  /** Stops rendering and releases listeners (for temporary Munchys in menus). */
+  destroy(): void {
+    this.running = false;
+    this.ro.disconnect();
+    window.removeEventListener('pointermove', this.onPointer);
+  }
+
+  setHat(id: string | null): void {
+    if (id !== this.hat) {
+      this.hat = id;
+      this.kick(-0.2, 0.25);
+      this.tuft.vel += 6;
+    }
+  }
+
+  /** A full twirl. */
+  spin(): void {
+    this.spinT = 0.7;
+    if (this.jumpY === 0) this.jumpV = -2.6;
   }
 
   getMood(): MonsterMood {
@@ -145,6 +174,9 @@ export class MonsterCanvasController {
         break;
       case 'confused':
         this.lean.vel += 1.5;
+        break;
+      case 'burp':
+        this.kick(-0.35, 0.4);
         break;
     }
   }
@@ -210,6 +242,7 @@ export class MonsterCanvasController {
   private update(dt: number): void {
     this.time += dt;
     const t = this.time;
+    if (this.spinT > 0) this.spinT = Math.max(0, this.spinT - dt);
     const idleMood = this.opts.idleMood ?? 'idle';
 
     if (this.moodTimer > 0) {
@@ -351,6 +384,31 @@ export class MonsterCanvasController {
         armR = 1.6 - Math.sin(t * 20) * 0.4;
         break;
       }
+      case 'burp': {
+        open = 0.75 + Math.sin(t * 30) * 0.12;
+        smile = 0;
+        mw = 0.7;
+        cheeks = 1;
+        brow = 0.6;
+        armL = 0.9;
+        armR = 0.9;
+        breathe = Math.sin(t * 30) * 0.04 + 0.05;
+        break;
+      }
+      case 'dance': {
+        const beat = t * 4.2;
+        if (this.jumpY === 0 && Math.sin(beat) > 0.95) {
+          this.jumpV = -2.4;
+        }
+        open = 0.6;
+        smile = 1;
+        mw = 1.15;
+        brow = 0.5;
+        armL = 1.4 + Math.sin(beat) * 1.2;
+        armR = 1.4 - Math.sin(beat) * 1.2;
+        lean = Math.sin(beat) * 0.14;
+        break;
+      }
       case 'confused': {
         open = 0.18;
         smile = -0.3;
@@ -405,6 +463,8 @@ export class MonsterCanvasController {
   /* ---------------------------------------------------------------- */
 
   private render(): void {
+    // Cheap self-check in case a resize notification was missed
+    if (Math.abs(this.canvas.clientWidth - this.w) > 1 || Math.abs(this.canvas.clientHeight - this.h) > 1) this.resize();
     const { ctx, w, h, dpr } = this;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -426,6 +486,13 @@ export class MonsterCanvasController {
     ctx.save();
     ctx.translate(cx, ground + jy);
     ctx.rotate(this.lean.value);
+    if (this.spinT > 0) {
+      const p = 1 - this.spinT / 0.7;
+      const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+      ctx.translate(0, -1 * u);
+      ctx.rotate(e * Math.PI * 2);
+      ctx.translate(0, 1 * u);
+    }
     ctx.scale(this.sx.value, this.sy.value);
 
     ctx.lineJoin = 'round';
@@ -437,8 +504,15 @@ export class MonsterCanvasController {
     this.drawHorn(u, -1);
     this.drawHorn(u, 1);
     this.drawBody(u);
-    this.drawTuft(u);
+    if (!hatHidesTuft(this.hat)) this.drawTuft(u);
     this.drawFace(u);
+    if (this.hat) {
+      ctx.save();
+      ctx.translate(0, -1.9 * u);
+      ctx.rotate(this.tuft.value * 0.04);
+      drawHat(ctx, this.hat, u, this.time);
+      ctx.restore();
+    }
 
     ctx.restore();
   }
@@ -694,10 +768,10 @@ export class MonsterCanvasController {
     ctx.strokeStyle = INK;
     ctx.lineCap = 'round';
 
-    if (mood === 'happy' || mood === 'chewing') {
+    if (mood === 'happy' || mood === 'chewing' || mood === 'burp' || mood === 'dance') {
       ctx.lineWidth = r * 0.3;
       ctx.beginPath();
-      if (mood === 'happy') ctx.arc(x, y + r * 0.35, r * 0.62, Math.PI * 1.15, Math.PI * 1.85);
+      if (mood === 'happy' || mood === 'dance') ctx.arc(x, y + r * 0.35, r * 0.62, Math.PI * 1.15, Math.PI * 1.85);
       else ctx.arc(x, y - r * 0.2, r * 0.55, Math.PI * 0.15, Math.PI * 0.85);
       ctx.stroke();
       return;

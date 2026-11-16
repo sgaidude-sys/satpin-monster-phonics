@@ -467,7 +467,7 @@ button:focus-visible {
   scale: 1;
 }
 
-.cards-zone {
+.play-zone {
   position: relative;
   min-height: 0;
   display: flex;
@@ -667,10 +667,25 @@ button:focus-visible {
 
 .game.at-title .hud,
 .game.at-title .stage,
-.game.at-title .streak {
+.game.at-title .streak,
+.game.at-title .map,
+.game.at-map .stage,
+.game.at-level .map {
   opacity: 0;
   pointer-events: none;
   transition-delay: 0s;
+}
+
+.game.at-map .stage,
+.game.at-level .map,
+.game.at-title .map {
+  visibility: hidden;
+}
+
+.game:not(.at-level) .level-only,
+.game:not(.at-level) .star-meter,
+.game:not(.at-map) .map-only {
+  display: none;
 }
 
 .title.hide {
@@ -1191,7 +1206,7 @@ button:focus-visible {
     grid-template-rows: minmax(0, 1fr) auto;
   }
 
-  .cards-zone {
+  .play-zone {
     padding-bottom: 6px;
   }
 

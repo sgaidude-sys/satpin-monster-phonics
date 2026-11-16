@@ -1,4 +1,4 @@
-type Shape = 'dot' | 'star' | 'spark' | 'confetti' | 'ring' | 'crumb' | 'heart' | 'text';
+type Shape = 'dot' | 'star' | 'spark' | 'confetti' | 'ring' | 'crumb' | 'heart' | 'text' | 'orb';
 
 interface Particle {
   shape: Shape;
@@ -30,6 +30,8 @@ interface Flyer {
   dur: number;
   onArrive: () => void;
   trail: number;
+  color: string;
+  text?: string;
 }
 
 const CONFETTI = ['#ff5d8f', '#ffb020', '#2ed47a', '#29b6f6', '#9b6dff', '#ff7ac6', '#ffe14d'];
@@ -180,7 +182,14 @@ export class ParticleCanvasController {
   flyStar(x0: number, y0: number, x1: number, y1: number, onArrive: () => void): void {
     const cx = (x0 + x1) / 2 + rand(-80, 80);
     const cy = Math.min(y0, y1) - 160;
-    this.flyers.push({ x0, y0, cx, cy, x1, y1, t: 0, dur: 0.75, onArrive, trail: 0 });
+    this.flyers.push({ x0, y0, cx, cy, x1, y1, t: 0, dur: 0.75, onArrive, trail: 0, color: '#ffd43b' });
+  }
+
+  /** A letter bubble that swoops into a target (Munchy's mouth). */
+  flyLetter(x0: number, y0: number, x1: number, y1: number, text: string, color: string, onArrive: () => void): void {
+    const cx = (x0 + x1) / 2;
+    const cy = Math.min(y0, y1) - 120;
+    this.flyers.push({ x0, y0, cx, cy, x1, y1, t: 0, dur: 0.55, onArrive, trail: 0, color, text });
   }
 
   confetti(ms = 5000): void {
@@ -252,15 +261,19 @@ export class ParticleCanvasController {
           vx: rand(-30, 30),
           vy: rand(-30, 30),
           size: rand(6, 12),
-          color: Math.random() < 0.5 ? '#ffe14d' : '#ffffff',
+          color: Math.random() < 0.5 ? (f.text ? f.color : '#ffe14d') : '#ffffff',
           maxLife: rand(0.3, 0.5),
           additive: true,
         });
       }
-      this.add({ shape: 'star', x, y, size: 26, color: '#ffd43b', maxLife: 0.03, rot: f.t * 10 });
+      if (f.text) {
+        this.add({ shape: 'orb', x, y, size: 54 * (1 - e * 0.55), color: f.color, text: f.text, maxLife: 0.03, rot: 0 });
+      } else {
+        this.add({ shape: 'star', x, y, size: 26, color: '#ffd43b', maxLife: 0.03, rot: f.t * 10 });
+      }
       if (f.t >= 1) {
         this.flyers.splice(i, 1);
-        this.burst(f.x1, f.y1, '#ffd43b', 14);
+        this.burst(f.x1, f.y1, f.color, f.text ? 10 : 14);
         f.onArrive();
       }
     }
@@ -365,6 +378,23 @@ export class ParticleCanvasController {
           ctx.bezierCurveTo(-s * 1.4, -s * 0.1, -s * 0.6, -s * 1.2, 0, -s * 0.4);
           ctx.bezierCurveTo(s * 0.6, -s * 1.2, s * 1.4, -s * 0.1, 0, s * 0.9);
           ctx.fill();
+          break;
+        }
+        case 'orb': {
+          const r = p.size / 2;
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = '#ffffff';
+          ctx.strokeStyle = p.color;
+          ctx.lineWidth = r * 0.16;
+          ctx.beginPath();
+          ctx.arc(0, 0, r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = p.color;
+          ctx.font = `700 ${r * 1.3}px Andika, Fredoka, sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(p.text ?? '', 0, -r * 0.12);
           break;
         }
         case 'text': {
