@@ -6,604 +6,943 @@ import {
   type AnimalSticker,
   type SatpinLetter,
 } from './data/phonics';
-import {
-  playBoing,
-  playChime,
-  playFanfare,
-  playPhoneme,
-  playPop,
-  unlockAudio,
-} from './audio/soundEngine';
+import { engine, unlockAudio } from './audio/engine';
+import * as sfx from './audio/sfx';
+import { startMusic } from './audio/music';
+import { isNarratorSpeaking, playPhoneme, preloadRecordings, say, stopSpeech } from './audio/voice';
 import {
   loadProgression,
   MASTERY_TARGET,
   pickNextTargetLetter,
   pickRoundChoices,
   recordAttempt,
+  resetProgression,
   ROUNDS_PER_CELEBRATION,
   type ProgressionState,
 } from './state/progression';
 import { MonsterCanvasController } from './canvas/monsterCanvas';
 import { ParticleCanvasController } from './canvas/particleCanvas';
+import { SceneCanvas } from './canvas/sceneCanvas';
 
-class PhonicsGameApp {
+/* ------------------------------------------------------------------ */
+/*  Icons                                                              */
+/* ------------------------------------------------------------------ */
+
+const ICON = {
+  speaker: `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 9.2v5.6c0 .4.3.7.7.7h3.6l4.4 3.9c.5.4 1.3.1 1.3-.6V5.2c0-.7-.8-1-1.3-.6L7.3 8.5H3.7c-.4 0-.7.3-.7.7z"/><path d="M16 8.6a4.8 4.8 0 0 1 0 6.8M18.8 5.8a8.8 8.8 0 0 1 0 12.4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>`,
+  eye: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg>`,
+  settings: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2.4" fill="#fff"/><circle cx="15.5" cy="12" r="2.4" fill="#fff"/><circle cx="7.5" cy="18" r="2.4" fill="#fff"/></svg>`,
+  home: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v10h4.5v-5.5h4V20h4.5V10"/></svg>`,
+  play: `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.6v14.8a1.1 1.1 0 0 0 1.7.9l11.6-7.4a1.1 1.1 0 0 0 0-1.8L8.7 3.7A1.1 1.1 0 0 0 7 4.6z"/></svg>`,
+  close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>`,
+};
+
+function starPath(cx: number, cy: number, r: number, inner: number): string {
+  const pts: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const a = (i * Math.PI) / 5 - Math.PI / 2;
+    const rr = i % 2 === 0 ? r : inner;
+    pts.push(`${(cx + Math.cos(a) * rr).toFixed(2)},${(cy + Math.sin(a) * rr).toFixed(2)}`);
+  }
+  return `M${pts.join('L')}Z`;
+}
+
+const STAR_D = starPath(20, 21, 18, 8.6);
+const STAR_SVG = `<svg viewBox="0 0 40 40" aria-hidden="true">
+  <path class="star-empty" stroke-width="2.5" stroke-linejoin="round" d="${STAR_D}"/>
+  <g class="star-full">
+    <path fill="url(#starGrad)" stroke="#c46a00" stroke-width="2.6" stroke-linejoin="round" d="${STAR_D}"/>
+    <ellipse cx="15" cy="15" rx="3.2" ry="1.8" transform="rotate(-35 15 15)" fill="#fff" opacity=".85"/>
+  </g>
+</svg>`;
+
+const PRAISE = ['Yum!', 'Yummy!', 'Tasty!', 'Delish!', 'Munch!', 'Super!'];
+
+const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
+
+interface DragState {
+  card: HTMLButtonElement;
+  letter: SatpinLetter;
+  index: number;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  dx: number;
+  dy: number;
+  vx: number;
+  lastX: number;
+  lastT: number;
+  moved: boolean;
+  home: DOMRect;
+  trailAcc: number;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Game                                                               */
+/* ------------------------------------------------------------------ */
+
+class PhonicsGame {
   private root: HTMLElement;
   private state: ProgressionState;
-  private targetLetter: SatpinLetter;
+  private target: SatpinLetter;
   private choices: SatpinLetter[];
-  private isRoundLocked = false;
-  private showLetterHint = false;
-  private hasInteracted = false;
+  private locked = true;
+  private wrongThisRound = 0;
+  private streak = 0;
+  private hint = false;
+  private displayedStars: number;
+  private sayToken = 0;
+  private idleTimer: number | undefined;
+  private drag: DragState | null = null;
+  private started = false;
 
+  private scene!: SceneCanvas;
   private monster!: MonsterCanvasController;
-  private particles!: ParticleCanvasController;
+  private titleMonster!: MonsterCanvasController;
+  private fx!: ParticleCanvasController;
 
-  // DOM references
-  private cardsContainer!: HTMLElement;
-  private starsContainer!: HTMLElement;
-  private masteryStrip!: HTMLElement;
-  private speechTextEl!: HTMLElement;
-  private speechLetterBadge!: HTMLElement;
-  private stickerCountBadge!: HTMLElement;
-  private hintToggleBtn!: HTMLButtonElement;
-  private celebrationModal!: HTMLElement;
-  private stickerModal!: HTMLElement;
+  private el!: {
+    stage: HTMLElement;
+    cards: HTMLElement;
+    stars: HTMLElement;
+    mastery: HTMLElement;
+    listen: HTMLButtonElement;
+    hintBubble: HTMLElement;
+    hintBtn: HTMLButtonElement;
+    settingsBtn: HTMLButtonElement;
+    bookBtn: HTMLButtonElement;
+    bookCount: HTMLElement;
+    title: HTMLElement;
+    modal: HTMLElement;
+    settings: HTMLElement;
+    streak: HTMLElement;
+    monsterCanvas: HTMLCanvasElement;
+  };
 
   constructor(root: HTMLElement) {
     this.root = root;
     this.state = loadProgression();
-    this.targetLetter = pickNextTargetLetter(this.state);
-    this.choices = pickRoundChoices(this.targetLetter);
-
-    this.renderShell();
-    this.setupCanvases();
+    this.displayedStars = this.state.roundProgress;
+    this.target = pickNextTargetLetter(this.state);
+    this.choices = pickRoundChoices(this.target);
+    this.render();
+    this.scene = new SceneCanvas(this.root.querySelector('#scene')!);
+    this.fx = new ParticleCanvasController(this.root.querySelector('#fx')!);
+    this.monster = new MonsterCanvasController(this.el.monsterCanvas);
+    this.titleMonster = new MonsterCanvasController(this.root.querySelector('#title-monster')!, {
+      idleMood: 'wave',
+      sizeFactor: 1.05,
+    });
+    this.monster.setVoiceProviders(() => engine.voiceLevel(), isNarratorSpeaking);
+    this.titleMonster.setVoiceProviders(() => engine.voiceLevel(), isNarratorSpeaking);
+    this.bind();
     this.renderHud();
-    this.renderCards();
-    this.bindGlobalEvents();
+    this.renderSettings();
   }
 
-  private renderShell(): void {
+  /* ---------------------------------------------------------------- */
+  /*  DOM                                                              */
+  /* ---------------------------------------------------------------- */
+
+  private render(): void {
+    const stars = Array.from({ length: ROUNDS_PER_CELEBRATION }, (_, i) => `<div class="star-slot" data-i="${i}">${STAR_SVG}</div>`).join('');
+    const logo = "Munchy's"
+      .split('')
+      .map((ch, i) => {
+        const colors = ['#ff5d8f', '#ffb020', '#2ed47a', '#29b6f6', '#9b6dff', '#ff7ac6', '#ffd23f', '#22c5c5'];
+        return `<span style="--c:${colors[i % colors.length]};--i:${i}">${ch}</span>`;
+      })
+      .join('');
+
     this.root.innerHTML = `
-      <div class="relative flex h-[100dvh] w-screen flex-col overflow-hidden bg-gradient-to-b from-sky-200 via-sky-100 to-emerald-100">
-        <!-- Decorative soft background clouds & hills -->
-        <div class="pointer-events-none absolute inset-0 overflow-hidden">
-          <div class="absolute -left-12 top-10 h-28 w-56 rounded-full bg-white/60 blur-[1px]"></div>
-          <div class="absolute right-8 top-16 h-24 w-48 rounded-full bg-white/55 blur-[1px]"></div>
-          <div class="absolute -bottom-24 -left-16 h-56 w-[65vw] rounded-[100%] bg-emerald-200/70"></div>
-          <div class="absolute -bottom-28 -right-16 h-60 w-[60vw] rounded-[100%] bg-teal-200/60"></div>
-        </div>
+      <div class="game at-title">
+        <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+          <defs>
+            <linearGradient id="starGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#fff6b0"/>
+              <stop offset=".45" stop-color="#ffd23f"/>
+              <stop offset="1" stop-color="#ff9a1a"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <canvas id="scene" class="layer-scene"></canvas>
 
-        <!-- Particle & Confetti Overlay Canvas -->
-        <canvas id="particle-canvas" class="pointer-events-none fixed inset-0 z-40 h-full w-full"></canvas>
-
-        <!-- Top HUD -->
-        <header class="relative z-20 mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-2 px-4 pt-3 sm:px-6 sm:pt-4">
-          <div class="flex items-center gap-2.5 rounded-2xl bg-white/85 px-3.5 py-2 shadow-sm ring-2 ring-white backdrop-blur-sm">
-            <span class="text-2xl" aria-hidden="true">👾</span>
-            <div>
-              <h1 class="font-display text-base font-bold leading-tight text-teal-800 sm:text-lg">
-                Munchy's Phonics
-              </h1>
-              <div id="mastery-strip" class="mt-0.5 flex items-center gap-1"></div>
-            </div>
+        <header class="hud">
+          <div class="hud-group">
+            <button class="icon-btn" id="btn-home" type="button" aria-label="Back to title">${ICON.home}</button>
+            <div class="mastery" id="mastery" aria-label="Letter mastery"></div>
           </div>
-
-          <!-- 5-Round Star Meter -->
-          <div class="flex items-center gap-2 rounded-full bg-white/90 px-4 py-2 shadow-sm ring-2 ring-amber-200 backdrop-blur-sm">
-            <span class="hidden text-xs font-extrabold uppercase tracking-wider text-amber-600 sm:inline">
-              Sticker Goal
-            </span>
-            <div id="stars-container" class="flex items-center gap-1.5"></div>
-          </div>
-
-          <!-- Controls: Hint & Sticker Book -->
-          <div class="flex items-center gap-2">
-            <button
-              id="hint-toggle-btn"
-              type="button"
-              class="phonics-card flex items-center gap-1.5 rounded-2xl bg-white/90 px-3 py-2 text-xs font-extrabold text-slate-700 shadow-sm ring-2 ring-slate-200 sm:text-sm"
-              title="Show or hide the target letter in Munchy's speech bubble"
-            >
-              <span>👀</span>
-              <span class="hidden sm:inline">Hint</span>
-            </button>
-
-            <button
-              id="open-stickers-btn"
-              type="button"
-              class="phonics-card flex items-center gap-1.5 rounded-2xl bg-amber-300 px-3.5 py-2 text-xs font-extrabold text-amber-950 shadow-[0_4px_0_#d97706] ring-2 ring-amber-400 sm:text-sm"
-            >
-              <span>🦁</span>
-              <span>Stickers</span>
-              <span
-                id="sticker-count-badge"
-                class="rounded-full bg-white/90 px-2 py-0.5 text-xs font-black text-amber-800"
-              >0/${ANIMAL_STICKERS.length}</span>
+          <div class="star-meter" id="stars" aria-label="Stars towards the next sticker">${stars}</div>
+          <div class="hud-group">
+            <button class="icon-btn" id="btn-hint" type="button" aria-label="Show the letter hint" aria-pressed="false">${ICON.eye}</button>
+            <button class="icon-btn" id="btn-settings" type="button" aria-label="Sound settings" aria-expanded="false">${ICON.settings}</button>
+            <button class="sticker-btn" id="btn-book" type="button" aria-label="Open sticker book">
+              <span class="emoji" aria-hidden="true">📒</span>
+              <span class="label">Stickers</span>
+              <span class="count" id="book-count">0/${ANIMAL_STICKERS.length}</span>
             </button>
           </div>
         </header>
 
-        <!-- Main Stage: Monster (Left) + 3 Bouncy Cards (Right) -->
-        <main class="relative z-10 mx-auto grid w-full max-w-6xl flex-1 grid-cols-1 items-center gap-4 px-4 pb-4 pt-2 md:grid-cols-12 md:gap-6 md:px-6">
-          <!-- Left: Monster + Speech Bubble -->
-          <section class="relative flex h-full max-h-[38vh] flex-col items-center justify-end md:col-span-5 md:max-h-[76vh]">
-            <!-- Speech Bubble -->
-            <button
-              id="speak-again-btn"
-              type="button"
-              class="phonics-card animate-gentle-float group relative z-20 mb-1 flex items-center gap-3 rounded-3xl bg-white px-5 py-3 shadow-[0_6px_0_#cbd5e1] ring-4 ring-sky-200 focus:outline-none"
-              aria-label="Hear the sound again"
-            >
-              <span class="flex h-11 w-11 items-center justify-center rounded-2xl bg-sky-500 text-2xl text-white shadow-inner transition-transform group-hover:scale-110">
-                🔊
-              </span>
-              <div class="text-left">
-                <p id="speech-text" class="font-display text-lg font-bold text-slate-800 sm:text-xl">
-                  Tap to hear!
-                </p>
-                <p class="text-xs font-bold text-sky-600">
-                  Feed Munchy the matching sound
-                </p>
-              </div>
-              <span
-                id="speech-letter-badge"
-                class="font-display hidden h-11 w-11 items-center justify-center rounded-2xl bg-amber-100 text-2xl font-bold text-amber-700 ring-2 ring-amber-300"
-              ></span>
-              <!-- Speech bubble tail -->
-              <span class="absolute -bottom-2.5 left-1/2 h-5 w-5 -translate-x-1/2 rotate-45 bg-white ring-b-4 ring-r-4 ring-sky-200"></span>
+        <div class="streak" id="streak" aria-live="polite"></div>
+
+        <main class="stage" id="stage">
+          <section class="monster-zone">
+            <button class="listen-btn" id="btn-listen" type="button" aria-label="Hear the sound again">
+              <span class="listen-icon">${ICON.speaker}</span>
+              <span class="listen-label"><b>Listen!</b><small>Which card starts with this sound?</small></span>
             </button>
-
-            <!-- Monster Canvas -->
-            <div
-              id="monster-wrapper"
-              class="relative flex w-full flex-1 cursor-pointer items-center justify-center"
-              title="Tap Munchy to hear the sound again"
-            >
-              <canvas id="monster-canvas" class="h-full w-full max-w-[380px]"></canvas>
-            </div>
+            <div class="hint-bubble" id="hint-bubble" aria-hidden="true"><span></span></div>
+            <canvas class="monster-canvas" id="monster" aria-label="Munchy the monster. Tap to hear the sound again." role="img"></canvas>
           </section>
-
-          <!-- Right: 3 Bouncy Phonics Cards -->
-          <section class="flex h-full items-center justify-center md:col-span-7">
-            <div
-              id="cards-container"
-              class="grid w-full max-w-2xl grid-cols-3 gap-3 sm:gap-5"
-            ></div>
+          <section class="cards-zone">
+            <div class="cards" id="cards"></div>
+            <p class="instruction">Drag or tap the right card into Munchy's mouth!</p>
           </section>
         </main>
 
-        <!-- 5-Round Celebration & Sticker Unlock Modal -->
-        <div
-          id="celebration-modal"
-          class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-900/45 p-4 backdrop-blur-sm"
-        ></div>
+        <div class="settings" id="settings" role="dialog" aria-label="Settings"></div>
 
-        <!-- Collectible Sticker Book & Mastery Modal -->
-        <div
-          id="sticker-modal"
-          class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-900/45 p-4 backdrop-blur-sm"
-        ></div>
+        <div class="title" id="title">
+          <div class="logo">
+            <div class="logo-top" aria-label="Munchy's">${logo}</div>
+            <div class="logo-bottom">Phonics Feast</div>
+          </div>
+          <canvas class="title-monster" id="title-monster" aria-hidden="true"></canvas>
+          <button class="play-btn" id="btn-play" type="button">${ICON.play}<span>Play!</span></button>
+          <p class="title-sub">Listen to the sound · feed Munchy the matching letter</p>
+        </div>
+
+        <div class="modal" id="modal"></div>
+        <canvas id="fx" class="layer-fx"></canvas>
       </div>
     `;
 
-    this.cardsContainer = this.root.querySelector('#cards-container')!;
-    this.starsContainer = this.root.querySelector('#stars-container')!;
-    this.masteryStrip = this.root.querySelector('#mastery-strip')!;
-    this.speechTextEl = this.root.querySelector('#speech-text')!;
-    this.speechLetterBadge = this.root.querySelector('#speech-letter-badge')!;
-    this.stickerCountBadge = this.root.querySelector('#sticker-count-badge')!;
-    this.hintToggleBtn = this.root.querySelector('#hint-toggle-btn')!;
-    this.celebrationModal = this.root.querySelector('#celebration-modal')!;
-    this.stickerModal = this.root.querySelector('#sticker-modal')!;
-  }
-
-  private setupCanvases(): void {
-    const monsterCanvas = this.root.querySelector('#monster-canvas') as HTMLCanvasElement;
-    const particleCanvas = this.root.querySelector('#particle-canvas') as HTMLCanvasElement;
-    this.monster = new MonsterCanvasController(monsterCanvas);
-    this.particles = new ParticleCanvasController(particleCanvas);
-  }
-
-  private bindGlobalEvents(): void {
-    const speakBtn = this.root.querySelector('#speak-again-btn') as HTMLButtonElement;
-    const monsterWrapper = this.root.querySelector('#monster-wrapper') as HTMLElement;
-    const openStickersBtn = this.root.querySelector('#open-stickers-btn') as HTMLButtonElement;
-
-    const handleSpeak = () => {
-      unlockAudio();
-      this.hasInteracted = true;
-      playPop(1.1);
-      this.speakTargetPhoneme();
+    const q = <T extends HTMLElement>(s: string) => this.root.querySelector(s) as T;
+    this.el = {
+      stage: q('#stage'),
+      cards: q('#cards'),
+      stars: q('#stars'),
+      mastery: q('#mastery'),
+      listen: q('#btn-listen'),
+      hintBubble: q('#hint-bubble'),
+      hintBtn: q('#btn-hint'),
+      settingsBtn: q('#btn-settings'),
+      bookBtn: q('#btn-book'),
+      bookCount: q('#book-count'),
+      title: q('#title'),
+      modal: q('#modal'),
+      settings: q('#settings'),
+      streak: q('#streak'),
+      monsterCanvas: q('#monster'),
     };
+  }
 
-    speakBtn.addEventListener('click', handleSpeak);
-    monsterWrapper.addEventListener('click', handleSpeak);
+  private bind(): void {
+    const { el } = this;
+    this.root.addEventListener('contextmenu', (e) => e.preventDefault());
 
-    this.hintToggleBtn.addEventListener('click', () => {
+    q(this.root, '#btn-play').addEventListener('click', () => this.start());
+
+    q(this.root, '#btn-home').addEventListener('click', () => {
+      sfx.sfxTap(0.9);
+      this.closeSettings();
+      this.showTitle();
+    });
+
+    el.listen.addEventListener('click', () => {
+      if (this.locked) return;
+      sfx.sfxTap(1.1);
+      this.sayTarget();
+    });
+
+    el.monsterCanvas.addEventListener('click', () => {
       unlockAudio();
-      playPop(1.2);
-      this.showLetterHint = !this.showLetterHint;
+      this.monster.poke();
+      sfx.sfxGiggle();
+      this.fx.hearts(this.monster.getMouthScreenPosition().x, this.monster.getMouthScreenPosition().y - 80, 3);
+      if (!this.locked) setTimeout(() => this.sayTarget(), 450);
+    });
+
+    el.hintBtn.addEventListener('click', () => {
+      this.hint = !this.hint;
+      sfx.sfxToggle(this.hint);
+      this.renderHint();
+    });
+
+    el.settingsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (el.settings.classList.contains('open')) this.closeSettings();
+      else {
+        el.settings.classList.add('open');
+        el.settingsBtn.setAttribute('aria-expanded', 'true');
+        sfx.sfxPanel(true);
+      }
+    });
+    document.addEventListener('pointerdown', (e) => {
+      if (!el.settings.classList.contains('open')) return;
+      const t = e.target as Node;
+      if (!el.settings.contains(t) && !el.settingsBtn.contains(t)) this.closeSettings();
+    });
+
+    el.bookBtn.addEventListener('click', () => this.openBook());
+    el.modal.addEventListener('click', (e) => {
+      if (e.target === el.modal && el.modal.dataset.kind === 'book') this.closeModal();
+    });
+
+    engine.onSettingsChange(() => this.renderSettings());
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        this.closeSettings();
+        if (el.modal.dataset.kind === 'book') this.closeModal();
+      }
+    });
+
+    document.addEventListener('pointerdown', () => this.bumpIdle(), { passive: true });
+  }
+
+  private closeSettings(): void {
+    if (!this.el.settings.classList.contains('open')) return;
+    this.el.settings.classList.remove('open');
+    this.el.settingsBtn.setAttribute('aria-expanded', 'false');
+    sfx.sfxPanel(false);
+  }
+
+  private renderSettings(): void {
+    const s = engine.settings;
+    const row = (key: string, label: string, on: boolean) =>
+      `<button type="button" class="toggle-row" role="switch" aria-checked="${on}" data-key="${key}">
+        <span>${label}</span><span class="switch"></span>
+      </button>`;
+    this.el.settings.innerHTML = `
+      <h3>Settings</h3>
+      ${row('music', '🎵 Music', s.music)}
+      ${row('sfx', '🔔 Sound effects', s.sfx)}
+      ${row('narrator', '🗣️ Spoken words', s.narrator)}
+      <button type="button" class="reset-btn" id="btn-reset">Reset progress</button>
+    `;
+    this.el.settings.querySelectorAll<HTMLButtonElement>('.toggle-row').forEach((b) => {
+      b.addEventListener('click', () => {
+        const key = b.dataset.key as 'music' | 'sfx' | 'narrator';
+        const next = !engine.settings[key];
+        engine.setSetting(key, next);
+        sfx.sfxToggle(next);
+      });
+    });
+    q(this.el.settings, '#btn-reset').addEventListener('click', () => {
+      if (!window.confirm('Reset all stars, stickers and letter progress?')) return;
+      this.state = resetProgression();
+      this.displayedStars = 0;
+      this.streak = 0;
       this.renderHud();
+      sfx.sfxDrop();
+      this.closeSettings();
     });
-
-    openStickersBtn.addEventListener('click', () => {
-      unlockAudio();
-      playPop(1.15);
-      this.openStickerBook();
-    });
-
-    // Unlock audio on first pointer interaction anywhere
-    const firstUnlock = () => {
-      unlockAudio();
-      if (!this.hasInteracted) {
-        this.hasInteracted = true;
-        this.speakTargetPhoneme();
-      }
-      window.removeEventListener('pointerdown', firstUnlock);
-    };
-    window.addEventListener('pointerdown', firstUnlock, { once: true });
   }
 
-  private speakTargetPhoneme(): void {
-    this.speechTextEl.textContent = 'Find this sound!';
-    playPhoneme(
-      this.targetLetter,
-      () => this.monster.setMood('speaking', 1.0),
-      () => {
-        if (!this.isRoundLocked) {
-          this.monster.setMood('idle');
-        }
-      }
-    );
-  }
+  /* ---------------------------------------------------------------- */
+  /*  HUD                                                              */
+  /* ---------------------------------------------------------------- */
 
   private renderHud(): void {
-    // 5-Star progress meter
-    this.starsContainer.innerHTML = '';
-    for (let i = 0; i < ROUNDS_PER_CELEBRATION; i++) {
-      const filled = i < this.state.roundProgress;
-      const star = document.createElement('span');
-      star.className = `text-xl sm:text-2xl transition-transform ${
-        filled ? 'animate-star-pop scale-110' : 'opacity-30 grayscale'
-      }`;
-      star.textContent = '⭐';
-      this.starsContainer.appendChild(star);
-    }
-
-    // SATPIN mini mastery strip
-    this.masteryStrip.innerHTML = SATPIN_LETTERS.map((letter) => {
-      const m = this.state.mastery[letter];
-      const mastered = m.correct >= MASTERY_TARGET;
-      return `
-        <span
-          class="inline-flex h-5 w-5 items-center justify-center rounded-md text-[11px] font-black uppercase ${
-            mastered
-              ? 'bg-emerald-500 text-white shadow-xs'
-              : m.correct > 0
-                ? 'bg-amber-200 text-amber-900'
-                : 'bg-slate-200/80 text-slate-500'
-          }"
-          title="${letter}: ${m.correct}/${MASTERY_TARGET} correct"
-        >${letter}</span>
-      `;
+    this.renderStars();
+    this.el.mastery.innerHTML = SATPIN_LETTERS.map((l) => {
+      const m = this.state.mastery[l];
+      const item = SATPIN_ITEMS[l];
+      const p = Math.min(1, m.correct / MASTERY_TARGET);
+      return `<div class="chip ${p >= 1 ? 'is-mastered' : ''}" style="--accent:${item.accent};--p:${p}" title="${l}: ${m.correct}/${MASTERY_TARGET}"><span>${l}</span></div>`;
     }).join('');
+    this.el.bookCount.textContent = `${this.state.unlockedStickers.length}/${ANIMAL_STICKERS.length}`;
+    this.renderHint();
+  }
 
-    // Sticker count
-    this.stickerCountBadge.textContent = `${this.state.unlockedStickers.length}/${ANIMAL_STICKERS.length}`;
+  private renderStars(popIndex = -1): void {
+    this.el.stars.querySelectorAll<HTMLElement>('.star-slot').forEach((s, i) => {
+      s.classList.toggle('is-filled', i < this.displayedStars);
+      if (i === popIndex) {
+        s.classList.remove('pop');
+        void s.offsetWidth;
+        s.classList.add('pop');
+      }
+    });
+  }
 
-    // Hint badge in speech bubble
-    if (this.showLetterHint) {
-      this.speechLetterBadge.textContent = this.targetLetter;
-      this.speechLetterBadge.classList.remove('hidden');
-      this.speechLetterBadge.classList.add('flex');
-      this.hintToggleBtn.classList.add('ring-amber-400', 'bg-amber-100');
+  private renderHint(): void {
+    const item = SATPIN_ITEMS[this.target];
+    this.el.hintBubble.classList.toggle('show', this.hint && this.started);
+    this.el.hintBubble.style.setProperty('--accent', item.accent);
+    this.el.hintBubble.querySelector('span')!.textContent = this.target;
+    this.el.hintBtn.classList.toggle('is-on', this.hint);
+    this.el.hintBtn.setAttribute('aria-pressed', String(this.hint));
+  }
+
+  private showStreak(): void {
+    if (this.streak < 2) return;
+    const msgs = ['', '', 'Two in a row!', 'Three in a row!', 'On fire!', 'Unstoppable!'];
+    this.el.streak.textContent = `🔥 ${msgs[Math.min(this.streak, 5)] || `${this.streak} in a row!`}`;
+    this.el.streak.classList.add('show');
+    setTimeout(() => this.el.streak.classList.remove('show'), 1700);
+  }
+
+  /* ---------------------------------------------------------------- */
+  /*  Flow                                                             */
+  /* ---------------------------------------------------------------- */
+
+  private start(): void {
+    unlockAudio();
+    preloadRecordings();
+    sfx.sfxStart();
+    startMusic();
+    this.el.title.classList.add('hide');
+    this.root.querySelector('.game')!.classList.remove('at-title');
+    setTimeout(() => this.titleMonster.pause(true), 700);
+    this.monster.setMood('happy', 1.1);
+    this.fx.burst(window.innerWidth / 2, window.innerHeight * 0.6, '#2ed47a', 30);
+    if (!this.started) {
+      this.started = true;
+      setTimeout(() => this.newRound(), 650);
     } else {
-      this.speechLetterBadge.classList.add('hidden');
-      this.speechLetterBadge.classList.remove('flex');
-      this.hintToggleBtn.classList.remove('ring-amber-400', 'bg-amber-100');
+      this.locked = false;
+      this.renderHint();
+      setTimeout(() => this.sayTarget(), 500);
     }
   }
+
+  private showTitle(): void {
+    this.locked = true;
+    stopSpeech();
+    this.clearIdle();
+    this.titleMonster.pause(false);
+    this.el.title.classList.remove('hide');
+    this.root.querySelector('.game')!.classList.add('at-title');
+    this.el.hintBubble.classList.remove('show');
+  }
+
+  private newRound(): void {
+    this.locked = true;
+    this.wrongThisRound = 0;
+    this.target = pickNextTargetLetter(this.state, this.target);
+    this.choices = pickRoundChoices(this.target);
+    this.renderCards();
+    this.renderHint();
+    setTimeout(() => {
+      this.locked = false;
+      this.sayTarget();
+    }, 700);
+  }
+
+  private async sayTarget(): Promise<void> {
+    const token = ++this.sayToken;
+    this.el.listen.classList.add('is-playing');
+    this.monster.setMood('speaking', 5);
+    await playPhoneme(this.target);
+    if (token !== this.sayToken) return;
+    this.el.listen.classList.remove('is-playing');
+    if (this.monster.getMood() === 'speaking') this.monster.setMood('idle');
+    this.bumpIdle();
+  }
+
+  private bumpIdle(): void {
+    this.clearIdle();
+    if (!this.started || this.locked) return;
+    this.idleTimer = window.setTimeout(() => {
+      if (this.locked || this.el.title.classList.contains('hide') === false) return;
+      this.el.listen.classList.remove('nudge');
+      void this.el.listen.offsetWidth;
+      this.el.listen.classList.add('nudge');
+      this.sayTarget();
+    }, 11000);
+  }
+
+  private clearIdle(): void {
+    if (this.idleTimer !== undefined) clearTimeout(this.idleTimer);
+    this.idleTimer = undefined;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /*  Cards                                                            */
+  /* ---------------------------------------------------------------- */
 
   private renderCards(): void {
-    this.cardsContainer.innerHTML = '';
-
-    this.choices.forEach((letter, idx) => {
+    this.el.cards.innerHTML = '';
+    this.choices.forEach((letter, i) => {
       const item = SATPIN_ITEMS[letter];
+      const slot = document.createElement('div');
+      slot.className = 'card-slot deal';
+      slot.style.setProperty('--deal-rot', `${(i - 1) * 14 - 4}deg`);
       const card = document.createElement('button');
       card.type = 'button';
-      card.style.animationDelay = `${idx * 70}ms`;
-      card.className = `phonics-card animate-card-enter group relative flex flex-col items-center justify-between rounded-3xl border-4 p-3 sm:p-5 ${item.cardBg} ${item.cardBorder} ${item.cardShadow} focus:outline-none`;
-      card.setAttribute('aria-label', `${item.letter} for ${item.word}`);
-
+      card.className = 'card';
+      card.dataset.letter = letter;
+      card.style.setProperty('--accent', item.accent);
+      card.style.setProperty('--accent-dark', item.accentDark);
+      card.style.setProperty('--tint', item.tint);
+      card.style.setProperty('--bob-delay', `${i * -0.7}s`);
+      card.style.animationDelay = `${i * 0.11}s`;
+      card.setAttribute('aria-label', `${letter}, ${item.word}`);
       card.innerHTML = `
-        <div class="aspect-square w-full max-w-[115px] p-1 transition-transform duration-200 group-hover:scale-110 group-hover:-rotate-3">
-          ${item.svg}
-        </div>
-        <div class="mt-1 flex flex-col items-center">
-          <span class="font-display text-5xl font-bold leading-none sm:text-6xl ${item.letterColor}">
-            ${item.letter}
-          </span>
-          <span class="mt-1 rounded-full bg-white/80 px-2.5 py-0.5 text-xs font-extrabold tracking-wide text-slate-600 sm:text-sm">
-            <span class="${item.letterColor} font-black">${item.word[0]}</span>${item.word.slice(1)}
-          </span>
-        </div>
+        <div class="card-art"><div class="art-disc">${item.svg}</div></div>
+        <div class="card-letter">${letter}</div>
+        <div class="card-word"><b>${item.word[0]}</b>${item.word.slice(1)}</div>
       `;
-
-      card.addEventListener('pointerenter', () => {
-        if (!this.isRoundLocked) {
-          playPop(0.95 + idx * 0.1);
-        }
+      card.addEventListener('animationend', (e) => {
+        if (e.animationName === 'deal') slot.classList.remove('deal');
       });
-
-      card.addEventListener('click', () => {
-        this.handleCardClick(letter, card);
-      });
-
-      this.cardsContainer.appendChild(card);
+      slot.appendChild(card);
+      this.el.cards.appendChild(slot);
+      setTimeout(() => sfx.sfxDeal(i), i * 110 + 80);
+      this.bindCard(card, letter, i);
     });
   }
 
-  private handleCardClick(letter: SatpinLetter, cardEl: HTMLButtonElement): void {
-    if (this.isRoundLocked) return;
-    unlockAudio();
-    this.hasInteracted = true;
+  private bindCard(card: HTMLButtonElement, letter: SatpinLetter, index: number): void {
+    card.addEventListener('pointerenter', (e) => {
+      if (!this.locked && !this.drag && e.pointerType === 'mouse') sfx.sfxHover(index);
+    });
 
-    const isCorrect = letter === this.targetLetter;
-    const { nextState, triggeredCelebration, unlockedSticker } = recordAttempt(
-      this.state,
-      this.targetLetter,
-      isCorrect
+    card.addEventListener('pointermove', (e) => {
+      if (this.drag?.card === card) return this.onDragMove(e);
+      if (e.pointerType !== 'mouse' || this.locked) return;
+      const r = card.getBoundingClientRect();
+      const nx = (e.clientX - r.left) / r.width - 0.5;
+      const ny = (e.clientY - r.top) / r.height - 0.5;
+      card.style.setProperty('--ry', `${nx * 16}deg`);
+      card.style.setProperty('--rx', `${-ny * 16}deg`);
+    });
+
+    card.addEventListener('pointerleave', () => {
+      card.style.setProperty('--rx', '0deg');
+      card.style.setProperty('--ry', '0deg');
+    });
+
+    card.addEventListener('pointerdown', (e) => {
+      if (this.locked || this.drag || e.button > 0) return;
+      e.preventDefault();
+      unlockAudio();
+      card.setPointerCapture(e.pointerId);
+      const home = (card.parentElement as HTMLElement).getBoundingClientRect();
+      this.drag = {
+        card,
+        letter,
+        index,
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        dx: 0,
+        dy: 0,
+        vx: 0,
+        lastX: e.clientX,
+        lastT: performance.now(),
+        moved: false,
+        home,
+        trailAcc: 0,
+      };
+    });
+
+    card.addEventListener('pointerup', (e) => this.onDragEnd(e, false));
+    card.addEventListener('pointercancel', (e) => this.onDragEnd(e, true));
+
+    // Keyboard activation
+    card.addEventListener('click', (e) => {
+      if (e.detail === 0 && !this.locked) this.feed(card, letter);
+    });
+  }
+
+  private onDragMove(e: PointerEvent): void {
+    const d = this.drag;
+    if (!d || e.pointerId !== d.pointerId) return;
+    d.dx = e.clientX - d.startX;
+    d.dy = e.clientY - d.startY;
+    const now = performance.now();
+    const dt = Math.max(1, now - d.lastT);
+    d.vx = d.vx * 0.7 + ((e.clientX - d.lastX) / dt) * 1000 * 0.3;
+    d.lastX = e.clientX;
+    d.lastT = now;
+
+    if (!d.moved && Math.hypot(d.dx, d.dy) > 8) {
+      d.moved = true;
+      d.card.classList.add('is-dragging');
+      d.card.style.setProperty('--rx', '0deg');
+      d.card.style.setProperty('--ry', '0deg');
+      sfx.sfxPickup(d.index);
+    }
+    if (!d.moved) return;
+
+    d.card.style.translate = `${d.dx}px ${d.dy}px`;
+    d.card.style.rotate = `${clamp(d.vx * 0.012, -16, 16)}deg`;
+
+    const cx = d.home.left + d.home.width / 2 + d.dx;
+    const cy = d.home.top + d.home.height / 2 + d.dy;
+    const mouth = this.monster.getMouthScreenPosition();
+    const dist = Math.hypot(mouth.x - cx, mouth.y - cy);
+    const range = this.monster.getUnitPx() * 4;
+    this.monster.setHunger(clamp(1 - (dist - 60) / range, 0, 1), cx, cy);
+
+    d.trailAcc += dt;
+    if (d.trailAcc > 30) {
+      d.trailAcc = 0;
+      this.fx.trail(cx, cy, SATPIN_ITEMS[d.letter].accent);
+    }
+  }
+
+  private onDragEnd(e: PointerEvent, cancelled: boolean): void {
+    const d = this.drag;
+    if (!d || e.pointerId !== d.pointerId) return;
+    this.drag = null;
+    this.monster.setHunger(0);
+    if (!d.moved) {
+      if (!cancelled) this.feed(d.card, d.letter);
+      return;
+    }
+    const cx = d.home.left + d.home.width / 2 + d.dx;
+    const cy = d.home.top + d.home.height / 2 + d.dy;
+    const mouth = this.monster.getMouthScreenPosition();
+    const dist = Math.hypot(mouth.x - cx, mouth.y - cy);
+    const radius = Math.max(110, this.monster.getUnitPx() * 1.1);
+    if (!cancelled && dist < radius) {
+      this.feed(d.card, d.letter);
+    } else {
+      this.springBack(d.card);
+    }
+  }
+
+  private springBack(card: HTMLButtonElement): void {
+    sfx.sfxDrop();
+    const from = card.style.translate || '0px 0px';
+    const rot = card.style.rotate || '0deg';
+    card.classList.remove('is-dragging');
+    card.style.translate = '';
+    card.style.rotate = '';
+    card
+      .animate(
+        [
+          { translate: from, rotate: rot, scale: '1.1' },
+          { translate: '0px 0px', rotate: '0deg', scale: '1' },
+        ],
+        { duration: 520, easing: 'cubic-bezier(0.34, 1.56, 0.64, 1)' }
+      )
+      .finished.catch(() => {});
+  }
+
+  /* ---------------------------------------------------------------- */
+  /*  Feeding                                                          */
+  /* ---------------------------------------------------------------- */
+
+  private async flyToMouth(card: HTMLButtonElement): Promise<{ dx: number; dy: number }> {
+    const home = (card.parentElement as HTMLElement).getBoundingClientRect();
+    const fromT = card.style.translate || '0px 0px';
+    const fromR = card.style.rotate || '0deg';
+    const fromS = card.classList.contains('is-dragging') ? '1.1' : '1';
+    const [fx, fy] = fromT.split(' ').map((v) => parseFloat(v) || 0);
+    card.classList.remove('is-dragging');
+    card.classList.add('is-flying');
+    card.style.translate = '';
+    card.style.rotate = '';
+    card.style.setProperty('--rx', '0deg');
+    card.style.setProperty('--ry', '0deg');
+
+    const mouth = this.monster.getMouthScreenPosition();
+    const dx = mouth.x - (home.left + home.width / 2);
+    const dy = mouth.y - (home.top + home.height / 2);
+    this.monster.setHunger(1, mouth.x, mouth.y + 40);
+    sfx.sfxWhoosh(0.38);
+
+    const midX = (fx + dx) / 2;
+    const midY = Math.min(fy, dy) - 70;
+    const anim = card.animate(
+      [
+        { translate: `${fx}px ${fy}px`, rotate: fromR, scale: fromS },
+        { translate: `${midX}px ${midY}px`, rotate: '-12deg', scale: '0.85', offset: 0.5 },
+        { translate: `${dx}px ${dy}px`, rotate: '25deg', scale: '0.16' },
+      ],
+      { duration: 430, easing: 'cubic-bezier(0.45, 0, 0.8, 0.6)', fill: 'forwards' }
     );
-    this.state = nextState;
+    await anim.finished.catch(() => {});
+    return { dx, dy };
+  }
+
+  private async feed(card: HTMLButtonElement, letter: SatpinLetter): Promise<void> {
+    if (this.locked) return;
+    this.locked = true;
+    this.clearIdle();
+    this.sayToken++;
+    this.el.listen.classList.remove('is-playing');
+    stopSpeech();
+
+    const isCorrect = letter === this.target;
+    const result = recordAttempt(this.state, this.target, isCorrect);
+    this.state = result.nextState;
+
+    const pos = await this.flyToMouth(card);
+    this.monster.setHunger(0);
 
     if (isCorrect) {
-      this.isRoundLocked = true;
-      this.handleCorrectMatch(letter, cardEl, triggeredCelebration, unlockedSticker);
+      await this.onCorrect(card, result.triggeredCelebration, result.unlockedSticker);
     } else {
-      this.handleWrongMatch(cardEl);
+      await this.onWrong(card, pos);
     }
   }
 
-  private handleCorrectMatch(
-    letter: SatpinLetter,
-    cardEl: HTMLButtonElement,
-    triggeredCelebration: boolean,
-    unlockedSticker: AnimalSticker | null
-  ): void {
-    const item = SATPIN_ITEMS[letter];
-    const cardRect = cardEl.getBoundingClientRect();
+  private async onCorrect(card: HTMLButtonElement, celebrate: boolean, sticker: AnimalSticker | null): Promise<void> {
+    const item = SATPIN_ITEMS[this.target];
     const mouth = this.monster.getMouthScreenPosition();
+    card.style.opacity = '0';
+    if (this.wrongThisRound === 0) this.streak++;
+    else this.streak = 0;
 
-    // Particle burst at the card
-    this.particles.burst(
-      cardRect.left + cardRect.width / 2,
-      cardRect.top + cardRect.height / 2,
-      item.accentHex,
-      28
-    );
+    // Chomp chomp chomp... gulp!
+    this.monster.setMood('chewing', 0.85);
+    sfx.sfxMunch();
+    this.shake(4);
+    for (let i = 0; i < 3; i++) {
+      setTimeout(() => this.fx.crumbs(mouth.x, mouth.y, item.accent, 8), i * 170);
+    }
+    await wait(620);
+    this.monster.gulp();
+    await wait(230);
 
-    playChime();
-    this.monster.setMood('happy', 1.3);
-    this.speechTextEl.textContent = `Yum! "${item.letter}" for ${item.word}!`;
-
-    // Fly card into Munchy's mouth
-    const dx = mouth.x - (cardRect.left + cardRect.width / 2);
-    const dy = mouth.y - (cardRect.top + cardRect.height / 2);
-
-    const flyAnim = cardEl.animate(
-      [
-        { transform: 'translate(0, 0) scale(1.08, 0.92) rotate(0deg)', opacity: 1 },
-        {
-          transform: `translate(${dx * 0.55}px, ${dy * 0.55 - 40}px) scale(0.9, 1.1) rotate(-8deg)`,
-          opacity: 1,
-          offset: 0.45,
-        },
-        { transform: `translate(${dx}px, ${dy}px) scale(0.15, 0.15) rotate(16deg)`, opacity: 0 },
-      ],
-      {
-        duration: 520,
-        easing: 'cubic-bezier(0.34, 1.2, 0.64, 1)',
-        fill: 'forwards',
-      }
-    );
-
-    flyAnim.onfinish = () => {
-      // Second celebratory burst at Munchy's mouth!
-      this.particles.burst(mouth.x, mouth.y, item.accentHex, 36);
-      this.renderHud();
-
-      if (triggeredCelebration && unlockedSticker) {
-        this.triggerFiveRoundCelebration(unlockedSticker);
-      } else {
-        setTimeout(() => {
-          this.startNextRound();
-        }, 850);
-      }
-    };
-  }
-
-  private handleWrongMatch(cardEl: HTMLButtonElement): void {
-    const cardRect = cardEl.getBoundingClientRect();
-    const mouth = this.monster.getMouthScreenPosition();
-    const dx = mouth.x - (cardRect.left + cardRect.width / 2);
-    const dy = mouth.y - (cardRect.top + cardRect.height / 2);
-
-    cardEl.style.setProperty('--spit-dx', `${dx}px`);
-    cardEl.style.setProperty('--spit-dy', `${dy}px`);
-
-    // Restart spit-out animation cleanly
-    cardEl.classList.remove('animate-card-enter', 'animate-spit-out');
-    void cardEl.offsetWidth;
-    cardEl.classList.add('animate-spit-out');
-
-    playBoing();
-    this.monster.setMood('spitOut', 0.85);
-    this.speechTextEl.textContent = 'Oops! Try another one!';
-
-    // Gently replay the target sound after the playful bounce
-    setTimeout(() => {
-      if (!this.isRoundLocked) {
-        this.speakTargetPhoneme();
-      }
-    }, 750);
-  }
-
-  private startNextRound(): void {
-    this.isRoundLocked = false;
-    this.targetLetter = pickNextTargetLetter(this.state, this.targetLetter);
-    this.choices = pickRoundChoices(this.targetLetter);
-    this.renderCards();
+    this.monster.setMood('happy', 1.8);
+    sfx.sfxCorrect(this.streak);
+    this.fx.burst(mouth.x, mouth.y - 20, item.accent, 34);
+    this.fx.hearts(mouth.x, mouth.y - 40, 4);
+    this.fx.text(mouth.x, mouth.y - this.monster.getUnitPx() * 1.6, PRAISE[Math.floor(Math.random() * PRAISE.length)], item.accent, 52);
+    this.showStreak();
     this.renderHud();
-    if (this.hasInteracted) {
-      this.speakTargetPhoneme();
+
+    // Fade the other cards away
+    this.el.cards.querySelectorAll<HTMLElement>('.card').forEach((c) => {
+      if (c !== card) c.animate([{ opacity: 1, scale: '1' }, { opacity: 0, scale: '0.8' }], { duration: 300, fill: 'forwards', delay: 300 });
+    });
+
+    // Star flies into the meter
+    const slotIndex = Math.min(this.displayedStars, ROUNDS_PER_CELEBRATION - 1);
+    const slotEl = this.el.stars.querySelectorAll<HTMLElement>('.star-slot')[slotIndex];
+    const sr = slotEl.getBoundingClientRect();
+    const starArrived = new Promise<void>((resolve) => {
+      let landed = false;
+      const land = () => {
+        if (landed) return;
+        landed = true;
+        this.displayedStars = Math.min(ROUNDS_PER_CELEBRATION, this.displayedStars + 1);
+        this.renderStars(slotIndex);
+        sfx.sfxStar(slotIndex);
+        resolve();
+      };
+      setTimeout(() => {
+        sfx.sfxStarFly();
+        this.fx.flyStar(mouth.x, mouth.y - 30, sr.left + sr.width / 2, sr.top + sr.height / 2, land);
+      }, 250);
+      // Safety net: never let a paused animation frame stall the game
+      setTimeout(land, 2200);
+    });
+
+    // Blend the sound into the word: "sss... snake!"
+    await wait(350);
+    this.monster.setMood('speaking', 4);
+    await playPhoneme(this.target);
+    await say(`${item.word}!`, { rate: 0.95, pitch: 1.2 });
+    this.monster.setMood('happy', 0.8);
+    await starArrived;
+
+    if (celebrate && sticker) {
+      await wait(500);
+      this.celebrate(sticker);
+    } else {
+      await wait(450);
+      this.newRound();
     }
   }
 
-  private triggerFiveRoundCelebration(sticker: AnimalSticker): void {
-    // 5-second confetti celebration!
-    this.particles.startConfetti(5000);
-    playFanfare();
-    this.monster.setMood('happy', 5.0);
+  private async onWrong(card: HTMLButtonElement, pos: { dx: number; dy: number }): Promise<void> {
+    this.wrongThisRound++;
+    this.streak = 0;
+    const mouth = this.monster.getMouthScreenPosition();
 
-    this.celebrationModal.innerHTML = `
-      <div class="animate-modal-in relative w-full max-w-md rounded-[2rem] bg-white p-6 text-center shadow-2xl ring-8 ring-amber-300 sm:p-8">
-        <div class="text-sm font-black uppercase tracking-widest text-amber-500">
-          🎉 5 Rounds Complete! 🎉
-        </div>
-        <h2 class="font-display mt-1 text-3xl font-bold text-slate-800 sm:text-4xl">
-          Sticker Unlocked!
-        </h2>
+    this.monster.setMood('yuck', 0.75);
+    sfx.sfxWrong();
+    await wait(260);
+    sfx.sfxSpit();
+    this.fx.crumbs(mouth.x, mouth.y, '#bfe9ff', 6);
 
-        <div class="mx-auto my-6 flex h-36 w-36 items-center justify-center rounded-3xl border-4 ${sticker.bgClass} shadow-inner">
-          <span class="animate-gentle-float text-7xl sm:text-8xl">${sticker.emoji}</span>
-        </div>
-
-        <h3 class="font-display text-2xl font-bold text-teal-700">${sticker.name}</h3>
-        <p class="mt-1 text-sm font-bold text-slate-500">${sticker.tagline}</p>
-
-        <button
-          id="celebration-continue-btn"
-          type="button"
-          class="phonics-card mt-6 w-full rounded-2xl bg-emerald-500 px-6 py-4 font-display text-xl font-bold text-white shadow-[0_6px_0_#059669] hover:bg-emerald-400"
-        >
-          Keep Playing! 🚀
-        </button>
-      </div>
-    `;
-
-    this.celebrationModal.classList.remove('hidden');
-    this.celebrationModal.classList.add('flex');
-
-    const continueBtn = this.celebrationModal.querySelector(
-      '#celebration-continue-btn'
-    ) as HTMLButtonElement;
-    continueBtn.addEventListener('click', () => {
-      playPop(1.2);
-      this.celebrationModal.classList.add('hidden');
-      this.celebrationModal.classList.remove('flex');
-      this.startNextRound();
+    card.getAnimations().forEach((a) => a.cancel());
+    const back = card.animate(
+      [
+        { translate: `${pos.dx}px ${pos.dy}px`, rotate: '25deg', scale: '0.16' },
+        { translate: `${pos.dx * 0.4}px ${Math.min(pos.dy, 0) * 0.4 - 90}px`, rotate: '-200deg', scale: '1.05', offset: 0.55 },
+        { translate: '0px 0px', rotate: '-360deg', scale: '1' },
+      ],
+      { duration: 620, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' }
+    );
+    await back.finished.catch(() => {});
+    card.classList.remove('is-flying');
+    card.classList.add('is-tried');
+    card.animate([{ rotate: '0deg' }, { rotate: '-7deg' }, { rotate: '6deg' }, { rotate: '-3deg' }, { rotate: '0deg' }], {
+      duration: 420,
+      easing: 'ease-out',
     });
+
+    this.monster.setMood('confused', 1.3);
+    await wait(500);
+
+    this.locked = false;
+    if (this.wrongThisRound >= 2) {
+      // Scaffold: glow the right card and say the keyword
+      const right = this.el.cards.querySelector<HTMLElement>(`.card[data-letter="${this.target}"]`);
+      right?.classList.add('is-hint');
+      const token = ++this.sayToken;
+      this.el.listen.classList.add('is-playing');
+      this.monster.setMood('speaking', 4);
+      await playPhoneme(this.target);
+      if (token === this.sayToken) await say(`like ${SATPIN_ITEMS[this.target].word}`, { rate: 0.9 });
+      if (token === this.sayToken) {
+        this.el.listen.classList.remove('is-playing');
+        this.monster.setMood('idle');
+      }
+      this.bumpIdle();
+    } else {
+      this.sayTarget();
+    }
   }
 
-  private openStickerBook(): void {
-    const stickerGrid = ANIMAL_STICKERS.map((sticker) => {
-      const unlocked = this.state.unlockedStickers.includes(sticker.id);
-      return `
-        <div class="flex flex-col items-center rounded-2xl border-3 p-3 text-center ${
-          unlocked
-            ? `${sticker.bgClass} shadow-sm`
-            : 'border-slate-200 bg-slate-100/80 opacity-60'
-        }">
-          <span class="text-4xl sm:text-5xl ${unlocked ? '' : 'brightness-0 opacity-25'}">
-            ${sticker.emoji}
-          </span>
-          <span class="mt-1.5 text-xs font-extrabold text-slate-700">
-            ${unlocked ? sticker.name : 'Locked'}
-          </span>
-        </div>
-      `;
-    }).join('');
+  private shake(px: number): void {
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    this.el.stage.animate(
+      [
+        { translate: '0 0' },
+        { translate: `${-px}px ${px * 0.5}px` },
+        { translate: `${px}px ${-px * 0.5}px` },
+        { translate: `${-px * 0.5}px 0` },
+        { translate: '0 0' },
+      ],
+      { duration: 260, easing: 'ease-out' }
+    );
+  }
 
-    const masteryGrid = SATPIN_LETTERS.map((letter) => {
-      const m = this.state.mastery[letter];
-      const pct = Math.min(100, Math.round((m.correct / MASTERY_TARGET) * 100));
-      const item = SATPIN_ITEMS[letter];
-      return `
-        <div class="flex items-center gap-2.5 rounded-xl bg-slate-50 p-2.5 ring-1 ring-slate-200">
-          <span class="font-display flex h-9 w-9 items-center justify-center rounded-xl bg-white text-xl font-bold shadow-xs ${item.letterColor}">
-            ${letter}
-          </span>
-          <div class="flex-1">
-            <div class="flex justify-between text-xs font-extrabold text-slate-600">
-              <span>${item.word}</span>
-              <span>${m.correct}/${MASTERY_TARGET} ⭐</span>
-            </div>
-            <div class="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-200">
-              <div
-                class="h-full rounded-full transition-all"
-                style="width: ${pct}%; background-color: ${item.accentHex}"
-              ></div>
-            </div>
+  /* ---------------------------------------------------------------- */
+  /*  Celebration & sticker book                                       */
+  /* ---------------------------------------------------------------- */
+
+  private stickerHtml(s: AnimalSticker, size: number): string {
+    return `<div class="sticker" style="--bg:${s.bg};--ring:${s.ring};--size:${size}px"><span class="emoji">${s.emoji}</span></div>`;
+  }
+
+  private openModal(kind: string, html: string): void {
+    this.el.modal.dataset.kind = kind;
+    this.el.modal.innerHTML = html;
+    this.el.modal.classList.add('open');
+  }
+
+  private closeModal(): void {
+    this.el.modal.classList.remove('open');
+    this.el.modal.dataset.kind = '';
+    sfx.sfxPanel(false);
+  }
+
+  private async celebrate(sticker: AnimalSticker): Promise<void> {
+    this.locked = true;
+    this.monster.setMood('happy', 6);
+    this.scene.celebrate(8);
+    this.fx.confetti(5000);
+    sfx.sfxFanfare();
+    say('Amazing! You earned a sticker!', { rate: 0.95, pitch: 1.2 });
+
+    this.openModal(
+      'celebrate',
+      `<div class="panel" role="dialog" aria-label="New sticker">
+        <div class="ribbon">Super Star!</div>
+        <div class="rays-wrap">
+          <div class="rays"></div>
+          <div class="reveal-card" id="reveal">
+            <div class="reveal-face"><div class="mystery">?</div></div>
+            <div class="reveal-face back">${this.stickerHtml(sticker, 170)}</div>
           </div>
         </div>
-      `;
+        <h2 id="reveal-title">A new sticker!</h2>
+        <p class="tagline" id="reveal-tag" style="opacity:0">${sticker.tagline}</p>
+        <button class="big-btn" id="btn-continue" type="button" style="opacity:0;pointer-events:none">Keep Playing! ${ICON.play.replace('<svg', '<svg width="26" height="26"')}</button>
+      </div>`
+    );
+
+    await wait(1500);
+    sfx.sfxDrumroll(1.1);
+    await wait(1150);
+    const reveal = this.el.modal.querySelector('#reveal');
+    if (!reveal) return;
+    reveal.classList.add('flipped');
+    sfx.sfxCrash();
+    sfx.sfxSparkle(undefined, 1.5);
+    const rr = reveal.getBoundingClientRect();
+    this.fx.burst(rr.left + rr.width / 2, rr.top + rr.height / 2, sticker.ring, 44);
+    const title = this.el.modal.querySelector('#reveal-title');
+    if (title) title.textContent = sticker.name;
+    const tag = this.el.modal.querySelector<HTMLElement>('#reveal-tag');
+    if (tag) tag.style.opacity = '1';
+    say(`${sticker.name}!`, { pitch: 1.25 });
+    this.el.bookBtn.classList.remove('bump');
+    void this.el.bookBtn.offsetWidth;
+    this.el.bookBtn.classList.add('bump');
+    this.renderHud();
+
+    await wait(700);
+    const btn = this.el.modal.querySelector<HTMLButtonElement>('#btn-continue');
+    if (!btn) return;
+    btn.style.transition = 'opacity .3s';
+    btn.style.opacity = '1';
+    btn.style.pointerEvents = 'auto';
+    btn.focus({ preventScroll: true });
+    btn.addEventListener('click', () => {
+      sfx.sfxTap(1.2);
+      this.closeModal();
+      this.displayedStars = 0;
+      this.renderStars();
+      this.newRound();
+    });
+  }
+
+  private openBook(): void {
+    unlockAudio();
+    sfx.sfxPanel(true);
+    this.closeSettings();
+    const stickers = ANIMAL_STICKERS.map((s) => {
+      const have = this.state.unlockedStickers.includes(s.id);
+      return `<div class="book-item">
+        ${have ? this.stickerHtml(s, 96) : `<div class="locked" style="--size:96px"><span class="emoji">${s.emoji}</span></div>`}
+        <span class="name">${have ? s.name : '???'}</span>
+      </div>`;
     }).join('');
 
-    this.stickerModal.innerHTML = `
-      <div class="animate-modal-in relative max-h-[90dvh] w-full max-w-xl overflow-y-auto rounded-[2rem] bg-white p-5 shadow-2xl ring-8 ring-sky-200 sm:p-7">
-        <div class="flex items-center justify-between">
-          <h2 class="font-display text-2xl font-bold text-slate-800 sm:text-3xl">
-            🦁 Sticker Book
-          </h2>
-          <button
-            id="close-stickers-btn"
-            type="button"
-            class="phonics-card flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-lg font-black text-slate-600 hover:bg-slate-200"
-            aria-label="Close sticker book"
-          >✕</button>
-        </div>
+    const mastery = SATPIN_LETTERS.map((l) => {
+      const item = SATPIN_ITEMS[l];
+      const c = Math.min(MASTERY_TARGET, this.state.mastery[l].correct);
+      const stars = Array.from({ length: MASTERY_TARGET }, (_, i) => `<i class="${i < c ? 'on' : ''}">★</i>`).join('');
+      return `<div class="mastery-row" style="--accent:${item.accent};--tint:${item.tint}">
+        <div class="letter"><span>${l}</span></div>
+        <div><div class="word">${item.word}</div><div class="mini-stars">${stars}</div></div>
+      </div>`;
+    }).join('');
 
-        <p class="mt-1 text-sm font-bold text-slate-500">
-          Win 5 rounds to unlock a new animal sticker! (${this.state.totalRoundsWon} total rounds won)
-        </p>
-
-        <div class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          ${stickerGrid}
-        </div>
-
-        <h3 class="font-display mt-6 text-lg font-bold text-slate-700">
-          SATPIN Letter Mastery
-        </h3>
-        <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-          ${masteryGrid}
-        </div>
-      </div>
-    `;
-
-    this.stickerModal.classList.remove('hidden');
-    this.stickerModal.classList.add('flex');
-
-    const closeBtn = this.stickerModal.querySelector('#close-stickers-btn') as HTMLButtonElement;
-    closeBtn.addEventListener('click', () => {
-      playPop(0.9);
-      this.stickerModal.classList.add('hidden');
-      this.stickerModal.classList.remove('flex');
-    });
-
-    this.stickerModal.addEventListener(
-      'click',
-      (e) => {
-        if (e.target === this.stickerModal) {
-          this.stickerModal.classList.add('hidden');
-          this.stickerModal.classList.remove('flex');
-        }
-      },
-      { once: true }
+    this.openModal(
+      'book',
+      `<div class="panel wide" role="dialog" aria-label="Sticker book">
+        <button class="icon-btn close-btn" id="btn-close-book" type="button" aria-label="Close">${ICON.close}</button>
+        <div class="book-title">📒 Sticker Book</div>
+        <p class="book-sub">Fill all 5 stars to win a new sticker! · ${this.state.totalRoundsWon} snacks eaten</p>
+        <div class="book-grid">${stickers}</div>
+        <div class="book-section">My Sounds</div>
+        <div class="mastery-list">${mastery}</div>
+      </div>`
     );
+    q(this.el.modal, '#btn-close-book').addEventListener('click', () => this.closeModal());
   }
 }
 
-const appRoot = document.getElementById('app');
-if (appRoot) {
-  new PhonicsGameApp(appRoot);
+function q<T extends HTMLElement = HTMLElement>(root: ParentNode, sel: string): T {
+  return root.querySelector(sel) as T;
+}
+
+const app = document.getElementById('app');
+if (app) {
+  new PhonicsGame(app);
 }

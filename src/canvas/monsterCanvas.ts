@@ -1,452 +1,894 @@
-export type MonsterMood = 'idle' | 'speaking' | 'happy' | 'spitOut';
+/**
+ * Munchy — a fully procedural, spring-driven cartoon monster.
+ * Sticker-style ink outlines, soft shading, expressive brows, eyes that track
+ * fingers & cards, a mouth that lip-syncs to the voice bus, jelly squash &
+ * stretch, hops, chewing, gulping and a wobbly hair tuft.
+ */
+
+export type MonsterMood =
+  | 'idle'
+  | 'speaking'
+  | 'happy'
+  | 'yuck'
+  | 'confused'
+  | 'chewing'
+  | 'wave';
+
+class Spring {
+  value: number;
+  target: number;
+  vel = 0;
+  constructor(v: number, public k = 220, public d = 14) {
+    this.value = v;
+    this.target = v;
+  }
+  step(dt: number): void {
+    const n = 3;
+    const h = dt / n;
+    for (let i = 0; i < n; i++) {
+      const f = -this.k * (this.value - this.target) - this.d * this.vel;
+      this.vel += f * h;
+      this.value += this.vel * h;
+    }
+  }
+}
+
+const INK = '#123a4a';
+const BODY_LIGHT = '#8ff5e2';
+const BODY_MID = '#2fcdb6';
+const BODY_DARK = '#13978d';
+const BELLY = '#dcfff7';
+
+interface Options {
+  idleMood?: MonsterMood;
+  sizeFactor?: number;
+}
 
 export class MonsterCanvasController {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
-  private mood: MonsterMood = 'idle';
+  private opts: Options;
+  private dpr = 1;
+  private w = 0;
+  private h = 0;
+  private time = 0;
+  private last = 0;
+  private running = true;
+
+  private mood: MonsterMood;
   private moodTimer = 0;
-  private rafId: number | null = null;
-  private lastTime = 0;
-  private elapsed = 0;
-  private pointerNorm = { x: 0.5, y: 0.4 };
+
+  private sx = new Spring(1, 260, 9);
+  private sy = new Spring(1, 260, 9);
+  private lean = new Spring(0, 120, 12);
+  private mouthOpen = new Spring(0, 260, 20);
+  private smile = new Spring(0.6, 160, 18);
+  private mouthW = new Spring(1, 200, 18);
+  private browLift = new Spring(0, 180, 16);
+  private browTilt = new Spring(0, 180, 16);
+  private cheeks = new Spring(0, 200, 14);
+  private armL = new Spring(0.5, 140, 10);
+  private armR = new Spring(0.5, 140, 10);
+  private tuft = new Spring(0, 90, 5);
+  private lookX = new Spring(0, 160, 18);
+  private lookY = new Spring(0, 160, 18);
+  private pupil = new Spring(1, 160, 14);
+
+  private jumpY = 0;
+  private jumpV = 0;
+  private hopTimer = 4;
+  private blink = 0;
   private blinkTimer = 2.5;
-  private isBlinking = false;
+  private saccadeTimer = 1;
+  private randomLook = { x: 0, y: 0 };
+  private pointer = { x: 0, y: 0, at: -10 };
+  private hunger = 0;
+  private hungerPoint = { x: 0, y: 0 };
+  private voiceLevel: () => number = () => 0;
+  private narratorActive: () => boolean = () => false;
+  private mouthScreen = { x: 0, y: 0 };
+  private eyeScreen = { x: 0, y: 0 };
+  private unit = 100;
 
-  // Squash and stretch spring state
-  private scaleX = 1;
-  private scaleY = 1;
-  private targetScaleX = 1;
-  private targetScaleY = 1;
-
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, opts: Options = {}) {
     this.canvas = canvas;
-    const context = canvas.getContext('2d');
-    if (!context) {
-      throw new Error('Could not initialize 2D context for monster canvas');
-    }
-    this.ctx = context;
-    this.handleResize();
-    window.addEventListener('resize', this.handleResize);
-    window.addEventListener('pointermove', this.handlePointerMove);
-    this.start();
+    this.ctx = canvas.getContext('2d')!;
+    this.opts = opts;
+    this.mood = opts.idleMood ?? 'idle';
+    const ro = new ResizeObserver(() => this.resize());
+    ro.observe(canvas);
+    this.resize();
+    window.addEventListener('pointermove', (e) => {
+      this.pointer.x = e.clientX;
+      this.pointer.y = e.clientY;
+      this.pointer.at = this.time;
+    });
+    this.last = performance.now();
+    requestAnimationFrame(this.loop);
   }
 
-  public destroy(): void {
-    if (this.rafId !== null) {
-      cancelAnimationFrame(this.rafId);
-    }
-    window.removeEventListener('resize', this.handleResize);
-    window.removeEventListener('pointermove', this.handlePointerMove);
+  setVoiceProviders(level: () => number, narrator: () => boolean): void {
+    this.voiceLevel = level;
+    this.narratorActive = narrator;
   }
 
-  public setMood(mood: MonsterMood, durationSec = 0): void {
+  pause(p: boolean): void {
+    const was = this.running;
+    this.running = !p;
+    if (!was && this.running) {
+      this.last = performance.now();
+      requestAnimationFrame(this.loop);
+    }
+  }
+
+  getMood(): MonsterMood {
+    return this.mood;
+  }
+
+  setMood(mood: MonsterMood, durationSec = 0): void {
+    const prev = this.mood;
     this.mood = mood;
     this.moodTimer = durationSec;
-
-    if (mood === 'happy') {
-      this.scaleX = 1.24;
-      this.scaleY = 0.78;
-    } else if (mood === 'spitOut') {
-      this.scaleX = 0.8;
-      this.scaleY = 1.22;
-    } else if (mood === 'speaking') {
-      this.scaleX = 1.1;
-      this.scaleY = 0.92;
+    switch (mood) {
+      case 'happy':
+        this.kick(0.35, -0.3);
+        if (this.jumpY === 0) this.jumpV = -3.4;
+        break;
+      case 'yuck':
+        this.kick(-0.3, 0.35);
+        break;
+      case 'speaking':
+        if (prev !== 'speaking') this.kick(0.12, -0.1);
+        break;
+      case 'chewing':
+        this.kick(0.25, -0.25);
+        break;
+      case 'confused':
+        this.lean.vel += 1.5;
+        break;
     }
   }
 
-  public getMouthScreenPosition(): { x: number; y: number } {
-    const rect = this.canvas.getBoundingClientRect();
-    return {
-      x: rect.left + rect.width * 0.52,
-      y: rect.top + rect.height * 0.61,
-    };
+  /** Card is being dragged nearby: 0 = far, 1 = right at the mouth. */
+  setHunger(level: number, clientX = 0, clientY = 0): void {
+    this.hunger = Math.max(0, Math.min(1, level));
+    this.hungerPoint.x = clientX;
+    this.hungerPoint.y = clientY;
   }
 
-  private handlePointerMove = (e: PointerEvent): void => {
-    const rect = this.canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-    const nx = (e.clientX - (rect.left + rect.width / 2)) / (window.innerWidth * 0.6);
-    const ny = (e.clientY - (rect.top + rect.height / 2)) / (window.innerHeight * 0.6);
-    this.pointerNorm.x = Math.max(-1, Math.min(1, nx));
-    this.pointerNorm.y = Math.max(-1, Math.min(1, ny));
-  };
+  /** Tickle reaction when tapped. */
+  poke(): void {
+    this.kick(-0.25, 0.25);
+    if (this.jumpY === 0) this.jumpV = -2.4;
+    this.tuft.vel += 8;
+  }
 
-  private handleResize = (): void => {
-    const rect = this.canvas.getBoundingClientRect();
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = Math.max(1, Math.floor(rect.width * dpr));
-    const h = Math.max(1, Math.floor(rect.height * dpr));
-    if (this.canvas.width !== w || this.canvas.height !== h) {
-      this.canvas.width = w;
-      this.canvas.height = h;
+  /** Big swallow stretch at the end of chewing. */
+  gulp(): void {
+    this.kick(-0.2, 0.3);
+  }
+
+  getMouthScreenPosition(): { x: number; y: number } {
+    if (this.mouthScreen.x === 0 && this.mouthScreen.y === 0) {
+      const r = this.canvas.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height * 0.6 };
     }
+    return { ...this.mouthScreen };
+  }
+
+  getUnitPx(): number {
+    return this.unit;
+  }
+
+  private kick(x: number, y: number): void {
+    this.sx.vel += x * 12;
+    this.sy.vel += y * 12;
+  }
+
+  private resize(): void {
+    const r = this.canvas.getBoundingClientRect();
+    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.w = Math.max(1, r.width);
+    this.h = Math.max(1, r.height);
+    this.canvas.width = Math.floor(this.w * this.dpr);
+    this.canvas.height = Math.floor(this.h * this.dpr);
+  }
+
+  private loop = (now: number): void => {
+    if (!this.running) return;
+    const dt = Math.min(0.05, (now - this.last) / 1000);
+    this.last = now;
+    this.update(dt);
+    this.render();
+    requestAnimationFrame(this.loop);
   };
 
-  private start(): void {
-    this.lastTime = performance.now();
-    const loop = (now: number) => {
-      const dt = Math.min(0.05, (now - this.lastTime) / 1000);
-      this.lastTime = now;
-      this.update(dt);
-      this.render();
-      this.rafId = requestAnimationFrame(loop);
-    };
-    this.rafId = requestAnimationFrame(loop);
-  }
+  /* ---------------------------------------------------------------- */
+  /*  Simulation                                                       */
+  /* ---------------------------------------------------------------- */
 
   private update(dt: number): void {
-    this.elapsed += dt;
+    this.time += dt;
+    const t = this.time;
+    const idleMood = this.opts.idleMood ?? 'idle';
 
     if (this.moodTimer > 0) {
       this.moodTimer -= dt;
-      if (this.moodTimer <= 0) {
-        this.mood = 'idle';
-      }
+      if (this.moodTimer <= 0) this.mood = idleMood;
     }
 
-    // Blinking
+    // Blink
     this.blinkTimer -= dt;
     if (this.blinkTimer <= 0) {
-      if (this.isBlinking) {
-        this.isBlinking = false;
-        this.blinkTimer = 2.2 + Math.random() * 2.5;
-      } else {
-        this.isBlinking = true;
-        this.blinkTimer = 0.13;
+      this.blinkTimer = 2 + Math.random() * 3;
+      if (Math.random() < 0.2) this.blinkTimer = 0.25; // double blink
+    }
+    const sinceBlink = this.blinkTimer;
+    this.blink = sinceBlink < 0.12 ? Math.sin((sinceBlink / 0.12) * Math.PI) : 0;
+
+    // Jump physics (units of body size)
+    const prevY = this.jumpY;
+    if (this.jumpY < 0 || this.jumpV < 0) {
+      this.jumpV += 15 * dt;
+      this.jumpY += this.jumpV * dt;
+      if (this.jumpY >= 0) {
+        this.jumpY = 0;
+        const impact = Math.min(1, Math.abs(this.jumpV) / 4);
+        this.jumpV = 0;
+        this.kick(0.4 * impact, -0.45 * impact);
+        this.tuft.vel -= 10 * impact;
+      }
+    }
+    this.tuft.vel += (this.jumpY - prevY) * 60;
+
+    // Look target
+    let lx = this.randomLook.x;
+    let ly = this.randomLook.y;
+    this.saccadeTimer -= dt;
+    if (this.saccadeTimer <= 0) {
+      this.saccadeTimer = 1.2 + Math.random() * 2.5;
+      this.randomLook = { x: Math.random() * 1.6 - 0.8, y: Math.random() * 0.8 - 0.4 };
+    }
+    const toLocal = (px: number, py: number) => {
+      const dx = px - this.eyeScreen.x;
+      const dy = py - this.eyeScreen.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const m = Math.min(1, len / (this.unit * 2.5));
+      return { x: (dx / len) * m, y: (dy / len) * m };
+    };
+    if (this.hunger > 0.01) {
+      const p = toLocal(this.hungerPoint.x, this.hungerPoint.y);
+      lx = p.x;
+      ly = p.y;
+    } else if (t - this.pointer.at < 2.5) {
+      const p = toLocal(this.pointer.x, this.pointer.y);
+      lx = p.x;
+      ly = p.y;
+    }
+    if (this.mood === 'confused') {
+      lx = 0.5;
+      ly = -0.7;
+    }
+    this.lookX.target = lx;
+    this.lookY.target = ly;
+
+    // Mood targets
+    let open = 0;
+    let smile = 0.6;
+    let mw = 1;
+    let brow = 0;
+    let tilt = 0;
+    let cheeks = 0;
+    let armL = 0.45 + Math.sin(t * 2.2) * 0.08;
+    let armR = 0.45 + Math.sin(t * 2.2 + 1) * 0.08;
+    let lean = Math.sin(t * 0.9) * 0.02;
+    let pupil = 1;
+    let breathe = Math.sin(t * 2.6) * 0.025;
+
+    const voice = this.voiceLevel();
+    const narr = this.narratorActive();
+
+    switch (this.mood) {
+      case 'idle':
+      case 'wave': {
+        this.hopTimer -= dt;
+        if (this.hopTimer <= 0 && this.jumpY === 0 && this.hunger < 0.05) {
+          this.hopTimer = 5 + Math.random() * 6;
+          this.jumpV = -2 - Math.random() * 0.8;
+          this.kick(-0.15, 0.2);
+        }
+        if (this.mood === 'wave') {
+          armR = 2.7 + Math.sin(t * 9) * 0.35;
+          open = 0.35;
+          smile = 1;
+          brow = 0.3;
+        }
+        break;
+      }
+      case 'speaking': {
+        const level = Math.max(voice, narr ? 0.35 + 0.35 * Math.sin(t * 17) * Math.sin(t * 5.3) : 0);
+        open = Math.min(1, level * 1.4);
+        smile = 0.5;
+        mw = 0.85 + level * 0.25;
+        brow = 0.35 + level * 0.3;
+        armL = 0.7 + level * 0.4;
+        armR = 0.7 + level * 0.4;
+        breathe += level * 0.03;
+        break;
+      }
+      case 'happy': {
+        if (this.jumpY === 0) {
+          this.jumpV = -3.2 - Math.random() * 0.6;
+          this.kick(-0.2, 0.3);
+        }
+        open = 0.8;
+        smile = 1;
+        mw = 1.25;
+        brow = 0.5;
+        armL = 2.6 + Math.sin(t * 14) * 0.35;
+        armR = 2.6 + Math.sin(t * 14 + Math.PI) * 0.35;
+        lean = Math.sin(t * 8) * 0.06;
+        break;
+      }
+      case 'chewing': {
+        open = Math.max(0, Math.sin(t * 18)) * 0.22;
+        smile = 0.9;
+        mw = 0.8;
+        cheeks = 1;
+        brow = 0.2;
+        armL = 1.2;
+        armR = 1.2;
+        breathe = Math.sin(t * 18) * 0.04;
+        break;
+      }
+      case 'yuck': {
+        open = 0;
+        smile = -0.2;
+        brow = -0.3;
+        tilt = 0.6;
+        lean = Math.sin(t * 26) * 0.1;
+        armL = 1.6 + Math.sin(t * 20) * 0.4;
+        armR = 1.6 - Math.sin(t * 20) * 0.4;
+        break;
+      }
+      case 'confused': {
+        open = 0.18;
+        smile = -0.3;
+        mw = 0.45;
+        brow = 0.2;
+        tilt = -0.8;
+        lean = 0.12;
+        armR = 2.2 + Math.sin(t * 3) * 0.1; // scratching head
+        break;
       }
     }
 
-    // Idle breathing squash & stretch
-    const breath = Math.sin(this.elapsed * 3.1);
-    if (this.mood === 'happy') {
-      const jump = Math.abs(Math.sin(this.elapsed * 10));
-      this.targetScaleX = 1 - jump * 0.1;
-      this.targetScaleY = 1 + jump * 0.12;
-    } else if (this.mood === 'speaking') {
-      const talkBounce = Math.sin(this.elapsed * 14);
-      this.targetScaleX = 1 + talkBounce * 0.04;
-      this.targetScaleY = 1 - talkBounce * 0.04;
-    } else if (this.mood === 'spitOut') {
-      this.targetScaleX = 1 + Math.sin(this.elapsed * 22) * 0.06;
-      this.targetScaleY = 1 - Math.sin(this.elapsed * 22) * 0.06;
-    } else {
-      this.targetScaleX = 1 + breath * 0.03;
-      this.targetScaleY = 1 - breath * 0.03;
+    // Hungry overlay: card being dragged close
+    if (this.hunger > 0.01 && this.mood !== 'chewing') {
+      const hgr = this.hunger;
+      open = Math.max(open, 0.25 + hgr * 0.95);
+      mw = Math.max(mw, 1 + hgr * 0.35);
+      smile = Math.max(smile, 0.6);
+      brow = Math.max(brow, 0.3 + hgr * 0.5);
+      pupil = 1 + hgr * 0.35;
+      const dir = this.hungerPoint.x > this.mouthScreen.x ? 1 : -1;
+      lean = dir * hgr * 0.14;
+      armL = 1.4 + hgr * 0.4 + Math.sin(t * 12) * 0.1 * hgr;
+      armR = 1.4 + hgr * 0.4 + Math.sin(t * 12 + 1) * 0.1 * hgr;
+      breathe += Math.sin(t * 10) * 0.02 * hgr;
     }
 
-    const lerpSpeed = Math.min(1, dt * 12);
-    this.scaleX += (this.targetScaleX - this.scaleX) * lerpSpeed;
-    this.scaleY += (this.targetScaleY - this.scaleY) * lerpSpeed;
+    this.mouthOpen.target = open;
+    this.smile.target = smile;
+    this.mouthW.target = mw;
+    this.browLift.target = brow;
+    this.browTilt.target = tilt;
+    this.cheeks.target = cheeks;
+    this.armL.target = armL;
+    this.armR.target = armR;
+    this.lean.target = lean;
+    this.pupil.target = pupil;
+    this.sx.target = 1 - breathe;
+    this.sy.target = 1 + breathe;
+    this.tuft.target = -this.lean.value * 2;
+
+    for (const s of [
+      this.sx, this.sy, this.lean, this.mouthOpen, this.smile, this.mouthW, this.browLift,
+      this.browTilt, this.cheeks, this.armL, this.armR, this.tuft, this.lookX, this.lookY, this.pupil,
+    ]) {
+      s.step(dt);
+    }
   }
+
+  /* ---------------------------------------------------------------- */
+  /*  Rendering                                                        */
+  /* ---------------------------------------------------------------- */
 
   private render(): void {
-    this.handleResize();
-    const { ctx, canvas } = this;
-    const w = canvas.width;
-    const h = canvas.height;
+    const { ctx, w, h, dpr } = this;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
 
-    const cx = w * 0.5;
-    const baseSize = Math.min(w, h) * 0.42;
-    const groundY = h * 0.86;
-
-    let jumpOffsetY = 0;
-    let wobbleAngle = 0;
-    if (this.mood === 'happy') {
-      jumpOffsetY = -Math.abs(Math.sin(this.elapsed * 9)) * baseSize * 0.24;
-      wobbleAngle = Math.sin(this.elapsed * 12) * 0.06;
-    } else if (this.mood === 'spitOut') {
-      wobbleAngle = Math.sin(this.elapsed * 26) * 0.1;
-    }
+    const f = this.opts.sizeFactor ?? 1;
+    const u = Math.min(w * 0.3, h * 0.34) * f;
+    this.unit = u;
+    const cx = w / 2;
+    const ground = h * 0.93;
+    const jy = this.jumpY * u;
 
     // Ground shadow
-    const shadowScale = Math.max(0.65, 1 + jumpOffsetY / (baseSize * 1.4));
-    ctx.save();
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.12)';
+    const lift = Math.min(1, -this.jumpY / 0.6);
+    ctx.fillStyle = `rgba(20, 60, 50, ${0.22 - lift * 0.1})`;
     ctx.beginPath();
-    ctx.ellipse(cx, groundY, baseSize * 0.72 * shadowScale, baseSize * 0.14 * shadowScale, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx, ground, u * 0.85 * (1 - lift * 0.3), u * 0.13 * (1 - lift * 0.3), 0, 0, Math.PI * 2);
     ctx.fill();
+
+    ctx.save();
+    ctx.translate(cx, ground + jy);
+    ctx.rotate(this.lean.value);
+    ctx.scale(this.sx.value, this.sy.value);
+
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    this.drawFeet(u);
+    this.drawArm(u, -1, this.armL.value);
+    this.drawArm(u, 1, this.armR.value);
+    this.drawHorn(u, -1);
+    this.drawHorn(u, 1);
+    this.drawBody(u);
+    this.drawTuft(u);
+    this.drawFace(u);
+
     ctx.restore();
+  }
 
-    // Monster body transform anchored at feet
-    ctx.save();
-    ctx.translate(cx, groundY + jumpOffsetY);
-    ctx.rotate(wobbleAngle);
-    ctx.scale(this.scaleX, this.scaleY);
-
-    const bodyCenterY = -baseSize * 0.92;
-
-    // Little feet
-    this.drawFoot(ctx, -baseSize * 0.36, -baseSize * 0.06, baseSize);
-    this.drawFoot(ctx, baseSize * 0.36, -baseSize * 0.06, baseSize);
-
-    // Waving arms
-    const armWave = this.mood === 'happy' ? Math.sin(this.elapsed * 16) * 0.45 : Math.sin(this.elapsed * 3.1) * 0.12;
-    this.drawArm(ctx, -baseSize * 0.78, bodyCenterY + baseSize * 0.12, baseSize, -1, armWave);
-    this.drawArm(ctx, baseSize * 0.78, bodyCenterY + baseSize * 0.12, baseSize, 1, -armWave);
-
-    // Cute horns
-    this.drawHorn(ctx, -baseSize * 0.42, bodyCenterY - baseSize * 0.72, baseSize, -0.35);
-    this.drawHorn(ctx, baseSize * 0.42, bodyCenterY - baseSize * 0.72, baseSize, 0.35);
-
-    // Main fuzzy body (teal/mint gradient)
-    const bodyGrad = ctx.createRadialGradient(
-      -baseSize * 0.2,
-      bodyCenterY - baseSize * 0.3,
-      baseSize * 0.1,
-      0,
-      bodyCenterY,
-      baseSize * 1.05
-    );
-    bodyGrad.addColorStop(0, '#5eead4');
-    bodyGrad.addColorStop(0.65, '#14b8a6');
-    bodyGrad.addColorStop(1, '#0f766e');
-
-    ctx.fillStyle = bodyGrad;
+  private bodyPath(u: number): void {
+    const { ctx } = this;
+    const cy = -1.0 * u;
+    const rx = 0.96 * u;
+    const ry = 0.93 * u;
+    const N = 96;
     ctx.beginPath();
-    ctx.moveTo(0, bodyCenterY - baseSize * 0.9);
-    ctx.bezierCurveTo(
-      baseSize * 0.95,
-      bodyCenterY - baseSize * 0.9,
-      baseSize * 1.02,
-      bodyCenterY + baseSize * 0.85,
-      0,
-      bodyCenterY + baseSize * 0.88
-    );
-    ctx.bezierCurveTo(
-      -baseSize * 1.02,
-      bodyCenterY + baseSize * 0.85,
-      -baseSize * 0.95,
-      bodyCenterY - baseSize * 0.9,
-      0,
-      bodyCenterY - baseSize * 0.9
-    );
-    ctx.fill();
-
-    // Soft belly patch
-    ctx.fillStyle = 'rgba(204, 251, 241, 0.55)';
-    ctx.beginPath();
-    ctx.ellipse(0, bodyCenterY + baseSize * 0.34, baseSize * 0.52, baseSize * 0.4, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Rosy cheeks
-    ctx.fillStyle = 'rgba(251, 113, 133, 0.55)';
-    ctx.beginPath();
-    ctx.ellipse(-baseSize * 0.5, bodyCenterY + baseSize * 0.02, baseSize * 0.14, baseSize * 0.09, 0, 0, Math.PI * 2);
-    ctx.ellipse(baseSize * 0.5, bodyCenterY + baseSize * 0.02, baseSize * 0.14, baseSize * 0.09, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Eyes
-    const eyeY = bodyCenterY - baseSize * 0.24;
-    const eyeOffsetX = baseSize * 0.3;
-    this.drawEye(ctx, -eyeOffsetX, eyeY, baseSize * 0.22);
-    this.drawEye(ctx, eyeOffsetX, eyeY, baseSize * 0.22);
-
-    // Mouth
-    this.drawMouth(ctx, 0, bodyCenterY + baseSize * 0.16, baseSize);
-
-    // Sound waves when speaking
-    if (this.mood === 'speaking') {
-      this.drawSoundWaves(ctx, baseSize * 0.95, bodyCenterY - baseSize * 0.35, baseSize);
+    for (let i = 0; i <= N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      const s = Math.sin(a);
+      const c = Math.cos(a);
+      const pear = 1 + 0.07 * Math.max(0, s) - 0.03 * Math.max(0, -s);
+      const fuzz = s < -0.2 ? 1 + 0.014 * Math.sin(a * 22) : 1;
+      const x = c * rx * pear * fuzz;
+      const y = cy + s * ry * fuzz;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     }
+    ctx.closePath();
+  }
 
+  private drawBody(u: number): void {
+    const { ctx } = this;
+    const cy = -1.0 * u;
+
+    this.bodyPath(u);
+    const g = ctx.createRadialGradient(-0.35 * u, cy - 0.45 * u, 0.1 * u, 0, cy, 1.1 * u);
+    g.addColorStop(0, BODY_LIGHT);
+    g.addColorStop(0.55, BODY_MID);
+    g.addColorStop(1, BODY_DARK);
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    ctx.save();
+    this.bodyPath(u);
+    ctx.clip();
+    // Bottom ambient occlusion
+    const ao = ctx.createLinearGradient(0, cy + 0.2 * u, 0, cy + 0.95 * u);
+    ao.addColorStop(0, 'rgba(8, 80, 80, 0)');
+    ao.addColorStop(1, 'rgba(8, 80, 80, 0.35)');
+    ctx.fillStyle = ao;
+    ctx.fillRect(-1.2 * u, cy, 2.4 * u, 1.2 * u);
+    // Belly
+    const bg = ctx.createRadialGradient(0, cy + 0.42 * u, 0.05 * u, 0, cy + 0.55 * u, 0.6 * u);
+    bg.addColorStop(0, BELLY);
+    bg.addColorStop(1, 'rgba(190, 250, 236, 0.85)');
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    ctx.ellipse(0, cy + 0.6 * u, 0.58 * u, 0.42 * u, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Spots
+    ctx.fillStyle = 'rgba(16, 140, 128, 0.35)';
+    const spots: [number, number, number][] = [
+      [-0.72, -0.25, 0.09],
+      [-0.6, 0.05, 0.06],
+      [0.74, -0.15, 0.08],
+      [0.62, 0.15, 0.05],
+      [-0.3, -0.75, 0.05],
+      [0.36, -0.78, 0.06],
+    ];
+    for (const [sx, sy, sr] of spots) {
+      ctx.beginPath();
+      ctx.arc(sx * u, cy + sy * u, sr * u, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Rim light
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+    ctx.lineWidth = 0.05 * u;
+    ctx.beginPath();
+    ctx.ellipse(0, cy, 0.86 * u, 0.83 * u, 0, Math.PI * 1.08, Math.PI * 1.42);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.beginPath();
+    ctx.ellipse(-0.52 * u, cy - 0.58 * u, 0.12 * u, 0.06 * u, -0.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    this.bodyPath(u);
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 0.065 * u;
+    ctx.stroke();
+  }
+
+  private drawFeet(u: number): void {
+    const { ctx } = this;
+    for (const side of [-1, 1]) {
+      const x = side * 0.4 * u;
+      ctx.fillStyle = BODY_DARK;
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 0.055 * u;
+      ctx.beginPath();
+      ctx.ellipse(x, -0.06 * u, 0.26 * u, 0.13 * u, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.lineWidth = 0.035 * u;
+      ctx.beginPath();
+      ctx.moveTo(x - 0.07 * u, 0.0);
+      ctx.lineTo(x - 0.07 * u, -0.06 * u);
+      ctx.moveTo(x + 0.07 * u, 0.0);
+      ctx.lineTo(x + 0.07 * u, -0.06 * u);
+      ctx.stroke();
+    }
+  }
+
+  private drawArm(u: number, side: number, angle: number): void {
+    const { ctx } = this;
+    ctx.save();
+    ctx.translate(side * 0.8 * u, -0.95 * u);
+    ctx.rotate(-side * angle);
+    const len = 0.46 * u;
+    const r = 0.13 * u;
+    ctx.fillStyle = BODY_MID;
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 0.055 * u;
+    ctx.beginPath();
+    ctx.roundRect(-r, -r * 0.5, r * 2, len, r);
+    ctx.fill();
+    ctx.stroke();
+    // Paw
+    ctx.beginPath();
+    ctx.arc(0, len - r * 0.2, r * 1.15, 0, Math.PI * 2);
+    ctx.fillStyle = BODY_LIGHT;
+    ctx.fill();
+    ctx.stroke();
     ctx.restore();
   }
 
-  private drawFoot(ctx: CanvasRenderingContext2D, x: number, y: number, size: number): void {
-    ctx.fillStyle = '#0d9488';
-    ctx.beginPath();
-    ctx.ellipse(x, y, size * 0.22, size * 0.11, 0, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  private drawArm(
-    ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    size: number,
-    dir: number,
-    angle: number
-  ): void {
+  private drawHorn(u: number, side: number): void {
+    const { ctx } = this;
     ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(angle);
-    ctx.fillStyle = '#14b8a6';
+    ctx.translate(side * 0.5 * u, -1.72 * u);
+    ctx.rotate(side * 0.35);
+    const g = ctx.createLinearGradient(0, 0, 0, -0.45 * u);
+    g.addColorStop(0, '#a78bfa');
+    g.addColorStop(1, '#f0abfc');
+    ctx.fillStyle = g;
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 0.055 * u;
     ctx.beginPath();
-    ctx.ellipse(dir * size * 0.14, 0, size * 0.22, size * 0.11, dir * 0.35, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
-
-  private drawHorn(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, tilt: number): void {
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(tilt);
-    ctx.fillStyle = '#a855f7';
-    ctx.beginPath();
-    ctx.moveTo(-size * 0.12, size * 0.12);
-    ctx.quadraticCurveTo(0, -size * 0.34, size * 0.12, size * 0.12);
+    ctx.moveTo(-0.14 * u, 0.1 * u);
+    ctx.quadraticCurveTo(-0.12 * u, -0.3 * u, side * 0.08 * u, -0.46 * u);
+    ctx.quadraticCurveTo(0.16 * u, -0.2 * u, 0.14 * u, 0.1 * u);
     ctx.closePath();
     ctx.fill();
-
-    // Cute horn stripe
-    ctx.strokeStyle = '#e9d5ff';
-    ctx.lineWidth = Math.max(2, size * 0.03);
-    ctx.lineCap = 'round';
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    ctx.lineWidth = 0.035 * u;
     ctx.beginPath();
-    ctx.moveTo(-size * 0.05, -size * 0.02);
-    ctx.lineTo(size * 0.05, -size * 0.05);
+    ctx.moveTo(-0.08 * u, -0.08 * u);
+    ctx.lineTo(0.09 * u, -0.12 * u);
+    ctx.moveTo(-0.05 * u, -0.22 * u);
+    ctx.lineTo(0.07 * u, -0.25 * u);
     ctx.stroke();
     ctx.restore();
   }
 
-  private drawEye(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number): void {
-    if (this.mood === 'happy') {
-      // Happy ^ ^ eyes
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = Math.max(3, radius * 0.26);
-      ctx.lineCap = 'round';
+  private drawTuft(u: number): void {
+    const { ctx } = this;
+    ctx.save();
+    ctx.translate(0, -1.9 * u);
+    ctx.rotate(this.tuft.value * 0.25);
+    ctx.fillStyle = BODY_MID;
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 0.05 * u;
+    for (const [a, l] of [[-0.55, 0.26], [0, 0.34], [0.55, 0.24]] as const) {
+      ctx.save();
+      ctx.rotate(a + this.tuft.value * 0.1);
       ctx.beginPath();
-      ctx.arc(x, y + radius * 0.2, radius * 0.72, Math.PI * 1.15, Math.PI * 1.85);
+      ctx.moveTo(-0.07 * u, 0.06 * u);
+      ctx.quadraticCurveTo(-0.08 * u, -l * 0.6 * u, 0.03 * u, -l * u);
+      ctx.quadraticCurveTo(0.08 * u, -l * 0.5 * u, 0.07 * u, 0.06 * u);
+      ctx.fill();
       ctx.stroke();
-      return;
+      ctx.restore();
     }
-
-    if (this.mood === 'spitOut') {
-      // Silly > < eyes
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = Math.max(3, radius * 0.24);
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      const dir = x < 0 ? 1 : -1;
-      ctx.beginPath();
-      ctx.moveTo(x - dir * radius * 0.5, y - radius * 0.4);
-      ctx.lineTo(x + dir * radius * 0.4, y);
-      ctx.lineTo(x - dir * radius * 0.5, y + radius * 0.4);
-      ctx.stroke();
-      return;
-    }
-
-    if (this.isBlinking) {
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = Math.max(3, radius * 0.22);
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(x - radius * 0.75, y);
-      ctx.lineTo(x + radius * 0.75, y);
-      ctx.stroke();
-      return;
-    }
-
-    // Big glossy eye
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fill();
-
-    const lookX = this.pointerNorm.x * radius * 0.28;
-    const lookY = this.pointerNorm.y * radius * 0.24;
-
-    ctx.fillStyle = '#0f172a';
-    ctx.beginPath();
-    ctx.arc(x + lookX, y + lookY, radius * 0.54, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Sparkle highlight
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(x + lookX - radius * 0.18, y + lookY - radius * 0.22, radius * 0.2, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.restore();
   }
 
-  private drawMouth(ctx: CanvasRenderingContext2D, x: number, y: number, size: number): void {
-    if (this.mood === 'speaking') {
-      const open = 0.5 + 0.5 * Math.sin(this.elapsed * 18);
-      const rx = size * 0.22;
-      const ry = size * (0.09 + open * 0.15);
-      ctx.fillStyle = '#881337';
-      ctx.beginPath();
-      ctx.ellipse(x, y + size * 0.06, rx, ry, 0, 0, Math.PI * 2);
-      ctx.fill();
+  private drawFace(u: number): void {
+    const { ctx } = this;
+    const eyeY = -1.3 * u;
+    const eyeX = 0.34 * u;
+    const er = 0.25 * u;
 
-      // Cute tongue
-      ctx.fillStyle = '#fb7185';
+    // Store screen anchors for look-at & card feeding
+    const m = ctx.getTransform();
+    const eyeP = m.transformPoint(new DOMPoint(0, eyeY));
+    const mouthY = -0.82 * u;
+    const mouthP = m.transformPoint(new DOMPoint(0, mouthY + 0.08 * u));
+    const rect = this.canvas.getBoundingClientRect();
+    this.eyeScreen = { x: rect.left + eyeP.x / this.dpr, y: rect.top + eyeP.y / this.dpr };
+    this.mouthScreen = { x: rect.left + mouthP.x / this.dpr, y: rect.top + mouthP.y / this.dpr };
+
+    // Cheeks
+    const ch = 1 + this.cheeks.value * 0.6;
+    ctx.fillStyle = 'rgba(255, 105, 150, 0.72)';
+    ctx.beginPath();
+    ctx.ellipse(-0.6 * u, -0.92 * u, 0.15 * u * ch, 0.09 * u * ch, 0, 0, Math.PI * 2);
+    ctx.ellipse(0.6 * u, -0.92 * u, 0.15 * u * ch, 0.09 * u * ch, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    this.drawEye(-eyeX, eyeY, er, -1);
+    this.drawEye(eyeX, eyeY, er, 1);
+    this.drawBrow(-eyeX, eyeY, u, -1);
+    this.drawBrow(eyeX, eyeY, u, 1);
+    this.drawMouth(0, mouthY, u);
+
+    if (this.mood === 'confused') {
+      const bob = Math.sin(this.time * 4) * 0.04 * u;
+      ctx.save();
+      ctx.font = `700 ${0.55 * u}px Fredoka, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.lineWidth = 0.08 * u;
+      ctx.strokeStyle = INK;
+      ctx.fillStyle = '#ffd43b';
+      ctx.strokeText('?', 1.0 * u, -1.95 * u + bob);
+      ctx.fillText('?', 1.0 * u, -1.95 * u + bob);
+      ctx.restore();
+      // Sweat drop
+      ctx.fillStyle = '#7dd3fc';
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 0.03 * u;
       ctx.beginPath();
-      ctx.ellipse(x, y + size * 0.08 + ry * 0.4, rx * 0.6, ry * 0.45, 0, 0, Math.PI * 2);
+      const dx = -0.78 * u;
+      const dy = -1.55 * u + ((this.time * 0.6) % 1) * 0.15 * u;
+      ctx.moveTo(dx, dy - 0.12 * u);
+      ctx.quadraticCurveTo(dx + 0.08 * u, dy, dx, dy + 0.05 * u);
+      ctx.quadraticCurveTo(dx - 0.08 * u, dy, dx, dy - 0.12 * u);
       ctx.fill();
+      ctx.stroke();
+    }
+
+    if (this.mood === 'speaking') {
+      const pulse = (this.time * 2.4) % 1;
+      for (let i = 0; i < 3; i++) {
+        const p = (pulse + i / 3) % 1;
+        ctx.strokeStyle = `rgba(255, 255, 255, ${(1 - p) * 0.9})`;
+        ctx.lineWidth = 0.05 * u;
+        ctx.beginPath();
+        ctx.arc(0.55 * u, mouthY, (0.3 + p * 0.5) * u, -0.35 * Math.PI, 0.35 * Math.PI);
+        ctx.stroke();
+      }
+    }
+  }
+
+  private drawEye(x: number, y: number, r: number, side: number): void {
+    const { ctx } = this;
+    const mood = this.mood;
+    ctx.strokeStyle = INK;
+    ctx.lineCap = 'round';
+
+    if (mood === 'happy' || mood === 'chewing') {
+      ctx.lineWidth = r * 0.3;
+      ctx.beginPath();
+      if (mood === 'happy') ctx.arc(x, y + r * 0.35, r * 0.62, Math.PI * 1.15, Math.PI * 1.85);
+      else ctx.arc(x, y - r * 0.2, r * 0.55, Math.PI * 0.15, Math.PI * 0.85);
+      ctx.stroke();
+      return;
+    }
+    if (mood === 'yuck') {
+      ctx.lineWidth = r * 0.28;
+      ctx.lineJoin = 'round';
+      const d = -side;
+      ctx.beginPath();
+      ctx.moveTo(x - d * r * 0.45, y - r * 0.42);
+      ctx.lineTo(x + d * r * 0.4, y);
+      ctx.lineTo(x - d * r * 0.45, y + r * 0.42);
+      ctx.stroke();
       return;
     }
 
-    if (this.mood === 'happy') {
-      // Big open joyful smile
-      ctx.fillStyle = '#881337';
+    // Sclera
+    ctx.fillStyle = '#ffffff';
+    ctx.lineWidth = r * 0.22;
+    ctx.beginPath();
+    ctx.ellipse(x, y, r, r * 1.08, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(x, y, r, r * 1.08, 0, 0, Math.PI * 2);
+    ctx.clip();
+    // subtle inner shade
+    ctx.fillStyle = 'rgba(80, 140, 160, 0.15)';
+    ctx.beginPath();
+    ctx.ellipse(x, y + r * 0.9, r * 1.2, r * 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    const lx = this.lookX.value * r * 0.38;
+    const ly = this.lookY.value * r * 0.34;
+    const ir = r * 0.64;
+    const ig = ctx.createRadialGradient(x + lx, y + ly + ir * 0.3, ir * 0.1, x + lx, y + ly, ir);
+    ig.addColorStop(0, '#ffe08a');
+    ig.addColorStop(0.7, '#f5a524');
+    ig.addColorStop(1, '#b45309');
+    ctx.fillStyle = ig;
+    ctx.beginPath();
+    ctx.arc(x + lx, y + ly, ir, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#1b1530';
+    ctx.beginPath();
+    ctx.arc(x + lx * 1.1, y + ly * 1.1, ir * 0.55 * this.pupil.value, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(x + lx - r * 0.24, y + ly - r * 0.28, r * 0.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + lx + r * 0.2, y + ly + r * 0.2, r * 0.09, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyelid (blink)
+    if (this.blink > 0.01) {
+      const top = y - r * 1.1;
+      const lid = r * 2.2 * this.blink;
+      ctx.fillStyle = BODY_MID;
+      ctx.fillRect(x - r * 1.2, top, r * 2.4, lid);
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = r * 0.2;
       ctx.beginPath();
-      ctx.arc(x, y, size * 0.34, 0, Math.PI);
+      ctx.moveTo(x - r * 1.1, top + lid);
+      ctx.lineTo(x + r * 1.1, top + lid);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = r * 0.22;
+    ctx.beginPath();
+    ctx.ellipse(x, y, r, r * 1.08, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  private drawBrow(x: number, y: number, u: number, side: number): void {
+    const { ctx } = this;
+    const lift = this.browLift.value * 0.1 * u;
+    const tilt = this.browTilt.value * 0.35 * -side;
+    const by = y - 0.38 * u - lift;
+    ctx.save();
+    ctx.translate(x, by);
+    ctx.rotate(tilt);
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 0.065 * u;
+    ctx.beginPath();
+    ctx.moveTo(-0.13 * u, 0.02 * u);
+    ctx.quadraticCurveTo(0, -0.05 * u, 0.13 * u, 0.02 * u);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  private drawMouth(x: number, y: number, u: number): void {
+    const { ctx } = this;
+    const open = this.mouthOpen.value;
+    const smile = this.smile.value;
+    const hw = 0.27 * u * Math.max(0.3, this.mouthW.value);
+    const cornerY = y - smile * 0.07 * u;
+
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 0.06 * u;
+
+    if (this.mood === 'yuck') {
+      // Wavy "bleh" + tongue
+      ctx.fillStyle = '#ff7a9a';
+      ctx.beginPath();
+      ctx.roundRect(x - 0.08 * u, y, 0.16 * u, 0.22 * u, 0.08 * u);
+      ctx.fill();
+      ctx.lineWidth = 0.04 * u;
+      ctx.stroke();
+      ctx.lineWidth = 0.06 * u;
+      ctx.beginPath();
+      ctx.moveTo(x - hw, y);
+      ctx.quadraticCurveTo(x - hw * 0.5, y - 0.08 * u, x, y);
+      ctx.quadraticCurveTo(x + hw * 0.5, y + 0.08 * u, x + hw, y);
+      ctx.stroke();
+      return;
+    }
+
+    if (open < 0.06) {
+      ctx.beginPath();
+      ctx.moveTo(x - hw, cornerY);
+      ctx.quadraticCurveTo(x, y + smile * 0.18 * u, x + hw, cornerY);
+      ctx.stroke();
+      // Cute fang
+      if (smile > 0.3) {
+        ctx.fillStyle = '#fff';
+        ctx.lineWidth = 0.025 * u;
+        const fx = x + hw * 0.35;
+        const fy = y + smile * 0.08 * u;
+        ctx.beginPath();
+        ctx.moveTo(fx - 0.045 * u, fy - 0.01 * u);
+        ctx.lineTo(fx, fy + 0.08 * u);
+        ctx.lineTo(fx + 0.045 * u, fy);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+      return;
+    }
+
+    const topY = y + 0.02 * u - smile * 0.02 * u;
+    const botY = y + (0.1 + open * 0.6) * u + smile * 0.06 * u;
+    const path = () => {
+      ctx.beginPath();
+      ctx.moveTo(x - hw, cornerY);
+      ctx.quadraticCurveTo(x, topY - open * 0.08 * u, x + hw, cornerY);
+      ctx.quadraticCurveTo(x + hw * 0.9, botY, x, botY);
+      ctx.quadraticCurveTo(x - hw * 0.9, botY, x - hw, cornerY);
+      ctx.closePath();
+    };
+    path();
+    ctx.fillStyle = '#4a0d2a';
+    ctx.fill();
+
+    ctx.save();
+    path();
+    ctx.clip();
+    // Throat shade
+    ctx.fillStyle = '#2a0418';
+    ctx.beginPath();
+    ctx.ellipse(x, (topY + botY) / 2, hw * 0.5, (botY - topY) * 0.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Tongue
+    const tg = ctx.createRadialGradient(x - hw * 0.2, botY - 0.1 * u, 0.02 * u, x, botY, hw);
+    tg.addColorStop(0, '#ffa3b8');
+    tg.addColorStop(1, '#f2557a');
+    ctx.fillStyle = tg;
+    ctx.beginPath();
+    ctx.ellipse(x, botY + 0.02 * u, hw * 0.7, 0.16 * u, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Teeth
+    ctx.fillStyle = '#ffffff';
+    for (const s of [-1, 1]) {
+      const tx = x + s * hw * 0.42;
+      const ty = topY - open * 0.05 * u;
+      ctx.beginPath();
+      ctx.moveTo(tx - 0.06 * u, ty - 0.03 * u);
+      ctx.lineTo(tx, ty + 0.1 * u);
+      ctx.lineTo(tx + 0.06 * u, ty - 0.03 * u);
       ctx.closePath();
       ctx.fill();
-
-      // Cute tooth
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.roundRect(x - size * 0.16, y, size * 0.1, size * 0.09, 3);
-      ctx.roundRect(x + size * 0.06, y, size * 0.1, size * 0.09, 3);
-      ctx.fill();
-
-      // Tongue
-      ctx.fillStyle = '#fb7185';
-      ctx.beginPath();
-      ctx.ellipse(x, y + size * 0.22, size * 0.18, size * 0.09, 0, 0, Math.PI * 2);
-      ctx.fill();
-      return;
-    }
-
-    if (this.mood === 'spitOut') {
-      // Silly wavy "bleh" mouth
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = Math.max(3, size * 0.045);
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(x - size * 0.22, y + size * 0.05);
-      ctx.quadraticCurveTo(x - size * 0.1, y - size * 0.04, x, y + size * 0.05);
-      ctx.quadraticCurveTo(x + size * 0.1, y + size * 0.14, x + size * 0.22, y + size * 0.05);
-      ctx.stroke();
-
-      // Silly tongue sticking out
-      ctx.fillStyle = '#fb7185';
-      ctx.beginPath();
-      ctx.roundRect(x - size * 0.08, y + size * 0.06, size * 0.16, size * 0.18, size * 0.08);
-      ctx.fill();
-      return;
-    }
-
-    // Friendly idle smile with one cute little tooth
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = Math.max(3, size * 0.045);
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.arc(x, y - size * 0.04, size * 0.26, 0.22 * Math.PI, 0.78 * Math.PI);
-    ctx.stroke();
-
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.roundRect(x - size * 0.08, y + size * 0.17, size * 0.09, size * 0.07, 2);
-    ctx.fill();
-  }
-
-  private drawSoundWaves(ctx: CanvasRenderingContext2D, x: number, y: number, size: number): void {
-    const pulse = (this.elapsed * 3) % 1;
-    ctx.save();
-    for (let i = 0; i < 3; i++) {
-      const p = (pulse + i * 0.33) % 1;
-      const radius = size * (0.18 + p * 0.34);
-      ctx.strokeStyle = `rgba(14, 165, 233, ${(1 - p) * 0.85})`;
-      ctx.lineWidth = Math.max(2.5, size * 0.035);
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.arc(x, y, radius, -0.32 * Math.PI, 0.32 * Math.PI);
-      ctx.stroke();
     }
     ctx.restore();
+
+    path();
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 0.06 * u;
+    ctx.stroke();
   }
 }

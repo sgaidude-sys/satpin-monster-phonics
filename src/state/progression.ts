@@ -73,6 +73,17 @@ export function loadProgression(): ProgressionState {
   }
 }
 
+export function resetProgression(): ProgressionState {
+  const fresh: ProgressionState = {
+    mastery: createInitialMastery(),
+    roundProgress: 0,
+    totalRoundsWon: 0,
+    unlockedStickers: [],
+  };
+  saveProgression(fresh);
+  return fresh;
+}
+
 export function saveProgression(state: ProgressionState): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
