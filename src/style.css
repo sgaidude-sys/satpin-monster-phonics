@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Nunito', ui-rounded, system-ui, -apple-system, sans-serif;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .font-display {
+    font-family: 'Fredoka', 'Nunito', ui-rounded, system-ui, sans-serif;
+  }
+}
+
+/* Heavy Game-Feel Squash & Stretch Animations */
+@keyframes cardEnter {
+  0% {
+    opacity: 0;
+    transform: translateY(28px) scale(0.75, 1.2);
+  }
+  55% {
+    opacity: 1;
+    transform: translateY(-8px) scale(1.08, 0.92);
+  }
+  80% {
+    transform: translateY(3px) scale(0.97, 1.04);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1, 1);
+  }
+}
+
+@keyframes gentleFloat {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes spitOutBounce {
+  0% {
+    transform: translate(0, 0) scale(1, 1) rotate(0deg);
+  }
+  20% {
+    transform: translate(calc(var(--spit-dx, -110px) * 0.45), calc(var(--spit-dy, -20px) * 0.45))
+      scale(0.84, 1.18) rotate(-10deg);
+  }
+  42% {
+    transform: translate(28px, -18px) scale(1.22, 0.78) rotate(12deg);
+  }
+  65% {
+    transform: translate(-14px, 8px) scale(0.92, 1.1) rotate(-6deg);
+  }
+  84% {
+    transform: translate(6px, -3px) scale(1.04, 0.96) rotate(2deg);
+  }
+  100% {
+    transform: translate(0, 0) scale(1, 1) rotate(0deg);
+  }
+}
+
+@keyframes starPop {
+  0% {
+    transform: scale(0.5);
+  }
+  50% {
+    transform: scale(1.45) rotate(12deg);
+  }
+  75% {
+    transform: scale(0.92) rotate(-6deg);
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+@keyframes modalBounceIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.65) translateY(30px);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.06) translateY(-6px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.phonics-card {
+  transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 150ms ease;
+  will-change: transform;
+}
+
+.phonics-card:hover {
+  transform: translateY(-6px) scale(1.06, 0.96);
+}
+
+.phonics-card:active {
+  transform: translateY(4px) scale(1.12, 0.88);
+}
+
+.animate-card-enter {
+  animation: cardEnter 460ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.animate-spit-out {
+  animation: spitOutBounce 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-gentle-float {
+  animation: gentleFloat 3.4s ease-in-out infinite;
+}
+
+.animate-star-pop {
+  animation: starPop 480ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.animate-modal-in {
+  animation: modalBounceIn 480ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
