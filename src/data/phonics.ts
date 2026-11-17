@@ -1,7 +1,16 @@
-export type SatpinLetter = 's' | 'a' | 't' | 'p' | 'i' | 'n';
+import { ART } from './art';
+
+export type Letter =
+  | 's' | 'a' | 't' | 'i' | 'p' | 'n'
+  | 'c' | 'k' | 'e' | 'h' | 'r' | 'm' | 'd'
+  | 'g' | 'o' | 'u' | 'l' | 'f' | 'b'
+  | 'j' | 'z' | 'w' | 'v' | 'y';
+
+/** @deprecated kept for older imports */
+export type SatpinLetter = Letter;
 
 export interface PhonicsItem {
-  letter: SatpinLetter;
+  letter: Letter;
   word: string;
   /** Main accent colour for the card */
   accent: string;
@@ -22,9 +31,30 @@ export interface AnimalSticker {
   tagline: string;
 }
 
-const OUT = '#26213f'; // shared ink outline colour for the illustration set
+const OUT = '#26213f';
 
-export const SATPIN_ITEMS: Record<SatpinLetter, PhonicsItem> = {
+const PALETTE: [string, string, string][] = [
+  ['#22c55e', '#15803d', '#ecfdf3'],
+  ['#f43f5e', '#be123c', '#fff1f3'],
+  ['#f59e0b', '#b45309', '#fffbeb'],
+  ['#ec4899', '#be185d', '#fdf2f8'],
+  ['#0ea5e9', '#0369a1', '#f0f9ff'],
+  ['#8b5cf6', '#6d28d9', '#f5f3ff'],
+  ['#f97316', '#c2410c', '#fff7ed'],
+  ['#14b8a6', '#0f766e', '#f0fdfa'],
+  ['#6366f1', '#4338ca', '#eef2ff'],
+  ['#65a30d', '#3f6212', '#f7fee7'],
+  ['#ef4444', '#b91c1c', '#fef2f2'],
+  ['#06b6d4', '#0e7490', '#ecfeff'],
+  ['#d946ef', '#a21caf', '#fdf4ff'],
+];
+
+function item(letter: Letter, word: string, colour: number): PhonicsItem {
+  const [accent, accentDark, tint] = PALETTE[colour];
+  return { letter, word, accent, accentDark, tint, svg: ART[word.replace('-', '')] };
+} // shared ink outline colour for the illustration set
+
+export const LETTER_ITEMS: Record<Letter, PhonicsItem> = {
   s: {
     letter: 's',
     word: 'snake',
@@ -168,9 +198,65 @@ export const SATPIN_ITEMS: Record<SatpinLetter, PhonicsItem> = {
       <path d="M10 62 L4 56 M110 62 L117 57 M30 72 L22 66 M96 72 L104 68" stroke="${OUT}" stroke-width="3.5" stroke-linecap="round"/>
     </svg>`,
   },
+  c: item('c', 'cat', 6),
+  k: item('k', 'kite', 4),
+  e: item('e', 'egg', 2),
+  h: item('h', 'hat', 8),
+  r: item('r', 'rabbit', 3),
+  m: item('m', 'moon', 9),
+  d: item('d', 'dog', 6),
+  g: item('g', 'goat', 7),
+  o: item('o', 'octopus', 5),
+  u: item('u', 'umbrella', 1),
+  l: item('l', 'leaf', 0),
+  f: item('f', 'fish', 6),
+  b: item('b', 'ball', 4),
+  j: item('j', 'jam', 10),
+  z: item('z', 'zebra', 11),
+  w: item('w', 'web', 8),
+  v: item('v', 'van', 5),
+  y: item('y', 'yo-yo', 12),
 };
 
-export const SATPIN_LETTERS: SatpinLetter[] = ['s', 'a', 't', 'p', 'i', 'n'];
+export const SATPIN_LETTERS: Letter[] = ['s', 'a', 't', 'i', 'p', 'n'];
+
+/** Jolly Phonics teaching order. */
+export const LETTER_GROUPS: Letter[][] = [
+  ['s', 'a', 't', 'i', 'p', 'n'],
+  ['c', 'k', 'e', 'h', 'r', 'm', 'd'],
+  ['g', 'o', 'u', 'l', 'f', 'b'],
+  ['j', 'z', 'w', 'v', 'y'],
+];
+
+export const ALL_LETTERS: Letter[] = LETTER_GROUPS.flat();
+
+/** Letters that make the same sound must never appear together as choices. */
+export const SAME_SOUND: Letter[][] = [['c', 'k']];
+
+/** The pure-sound clip used for a letter (c and k share /k/). */
+export const soundOf = (l: Letter): string => (l === 'c' ? 'k' : l);
+
+export interface BlendWord {
+  word: string;
+  letters: Letter[];
+  svg: string;
+  /** First world (0-based) where every letter has been taught */
+  world: number;
+}
+
+const BLEND_LIST: [string, number][] = [
+  ['pin', 0], ['pan', 0], ['tap', 0], ['tin', 0], ['ant', 0],
+  ['cat', 1], ['hat', 1], ['rat', 1], ['map', 1], ['pen', 1], ['hen', 1], ['net', 1],
+  ['dog', 2], ['sun', 2], ['bus', 2], ['cup', 2], ['bug', 2], ['bag', 2], ['bed', 2], ['fan', 2], ['log', 2], ['mop', 2], ['pot', 2],
+  ['jam', 3], ['web', 3], ['van', 3], ['jug', 3], ['zip', 3], ['jet', 3],
+];
+
+export const BLEND_WORDS: BlendWord[] = BLEND_LIST.map(([word, world]) => ({
+  word,
+  letters: word.split('') as Letter[],
+  svg: ART[word],
+  world,
+}));
 
 export const ANIMAL_STICKERS: AnimalSticker[] = [
   { id: 'lion', name: 'Sunny Lion', emoji: '🦁', bg: '#fef3c7', ring: '#f59e0b', tagline: 'Roaring with reading power!' },
@@ -181,4 +267,12 @@ export const ANIMAL_STICKERS: AnimalSticker[] = [
   { id: 'unicorn', name: 'Magic Unicorn', emoji: '🦄', bg: '#ede9fe', ring: '#8b5cf6', tagline: 'Sparkling letter champion!' },
   { id: 'fox', name: 'Clever Fox', emoji: '🦊', bg: '#ffedd5', ring: '#f97316', tagline: 'Quick ears, bright eyes!' },
   { id: 'octopus', name: 'Tickly Octopus', emoji: '🐙', bg: '#ffe4e6', ring: '#f43f5e', tagline: 'Eight arms for high-fives!' },
+  { id: 'tiger', name: 'Stripy Tiger', emoji: '🐯', bg: '#ffedd5', ring: '#f59e0b', tagline: 'Grrreat at sounds!' },
+  { id: 'monkey', name: 'Cheeky Monkey', emoji: '🐵', bg: '#fef3c7', ring: '#b45309', tagline: 'Swinging through words!' },
+  { id: 'penguin', name: 'Waddle Penguin', emoji: '🐧', bg: '#e0f2fe', ring: '#0369a1', tagline: 'Cool as ice!' },
+  { id: 'turtle', name: 'Steady Turtle', emoji: '🐢', bg: '#dcfce7', ring: '#15803d', tagline: 'Slow and steady blending!' },
+  { id: 'giraffe', name: 'Tall Giraffe', emoji: '🦒', bg: '#fef9c3', ring: '#ca8a04', tagline: 'Reaching new heights!' },
+  { id: 'whale', name: 'Splashy Whale', emoji: '🐳', bg: '#e0f2fe', ring: '#0ea5e9', tagline: 'A whale of a reader!' },
+  { id: 'butterfly', name: 'Flutter Butterfly', emoji: '🦋', bg: '#ede9fe', ring: '#6366f1', tagline: 'Fluttering through phonics!' },
+  { id: 'ladybird', name: 'Lucky Ladybird', emoji: '🐞', bg: '#fee2e2', ring: '#ef4444', tagline: 'Spot-on listening!' },
 ];

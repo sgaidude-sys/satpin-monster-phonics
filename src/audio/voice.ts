@@ -1,4 +1,4 @@
-import { SATPIN_ITEMS, type SatpinLetter } from '../data/phonics';
+import { ALL_LETTERS, BLEND_WORDS, LETTER_ITEMS, soundOf, type Letter } from '../data/phonics';
 import { engine } from './engine';
 
 /* ================================================================== */
@@ -181,7 +181,7 @@ function plosive(ctx: AudioContext, t: number, kind: 't' | 'p', dest: AudioNode)
 }
 
 /** Schedules the pure phoneme and returns its duration in seconds. */
-function synthPhoneme(ctx: AudioContext, letter: SatpinLetter, t: number, dest: AudioNode): number {
+function synthPhoneme(ctx: AudioContext, letter: Letter, t: number, dest: AudioNode): number {
   switch (letter) {
     case 's':
       // /s/ — long, bright hiss
@@ -248,6 +248,18 @@ function synthPhoneme(ctx: AudioContext, letter: SatpinLetter, t: number, dest: 
       plosive(ctx, t + 0.42, 'p', dest);
       return 0.58;
     }
+    default:
+      // Neutral fallback for sounds without a hand-tuned synth (real clips normally exist)
+      return voiced(ctx, t, {
+        f0: 240,
+        dur: 0.4,
+        gain: 2,
+        formants: [
+          [600, 100, 0],
+          [1500, 140, -6],
+          [2600, 220, -14],
+        ],
+      }, dest);
   }
 }
 
@@ -277,6 +289,10 @@ export const LINE_TEXT = {
   locked: 'Finish the glowing one first!',
   newhat: 'A new hat for me!',
   newsticker: 'A new sticker!',
+  mode_blend: 'Listen to my sounds. Blend them together, and feed me the picture!',
+  mode_build: "Let's build a word! Tap the sounds in order.",
+  blendit: 'Blend it!',
+  welldone: 'Well done! You read it!',
 } as const;
 
 export type LineKey = keyof typeof LINE_TEXT;
@@ -312,19 +328,24 @@ function loadClip(url: string): Promise<AudioBuffer | null> {
   return p;
 }
 
-const phonemeUrl = (l: SatpinLetter) => `/audio/${l}.mp3`;
-const wordUrl = (l: SatpinLetter) => `/audio/words/${SATPIN_ITEMS[l].word}.mp3`;
-const likeUrl = (l: SatpinLetter) => `/audio/words/like_${SATPIN_ITEMS[l].word}.mp3`;
+const file = (word: string) => word.replace(/[^a-z]/g, '');
+const phonemeUrl = (l: Letter) => `/audio/${soundOf(l)}.mp3`;
+const blendUrl = (l: Letter) => `/audio/blend/${soundOf(l)}.mp3`;
+const wordUrl = (l: Letter) => `/audio/words/${file(LETTER_ITEMS[l].word)}.mp3`;
+const likeUrl = (l: Letter) => `/audio/words/like_${file(LETTER_ITEMS[l].word)}.mp3`;
+const anyWordUrl = (w: string) => `/audio/words/${file(w)}.mp3`;
 const lineUrl = (k: LineKey) => `/audio/lines/${k}.mp3`;
 
 /** Kick off background loads so the first play has no delay. */
 export function preloadVoice(): void {
   if (!engine.ensure()) return;
-  (Object.keys(SATPIN_ITEMS) as SatpinLetter[]).forEach((l) => {
+  ALL_LETTERS.forEach((l) => {
     void loadClip(phonemeUrl(l));
+    void loadClip(blendUrl(l));
     void loadClip(wordUrl(l));
     void loadClip(likeUrl(l));
   });
+  BLEND_WORDS.forEach((w) => void loadClip(anyWordUrl(w.word)));
   (Object.keys(LINE_TEXT) as LineKey[]).forEach((k) => void loadClip(lineUrl(k)));
 }
 
@@ -446,7 +467,7 @@ async function playBuffer(buf: AudioBuffer): Promise<void> {
 }
 
 /** Plays the pure letter sound. Resolves when finished. */
-export async function playPhoneme(letter: SatpinLetter): Promise<void> {
+export async function playPhoneme(letter: Letter): Promise<void> {
   const ctx = engine.ensure();
   if (!ctx) return;
   const buf = await loadClip(phonemeUrl(letter));
@@ -459,19 +480,43 @@ export async function playPhoneme(letter: SatpinLetter): Promise<void> {
 }
 
 /** "snake!" — the keyword for a letter. */
-export async function sayWord(letter: SatpinLetter): Promise<void> {
+export async function sayWord(letter: Letter): Promise<void> {
   if (!engine.settings.narrator) return;
   const buf = await loadClip(wordUrl(letter));
   if (buf) return playBuffer(buf);
-  return say(`${SATPIN_ITEMS[letter].word}!`, { pitch: 1.2 });
+  return say(`${LETTER_ITEMS[letter].word}!`, { pitch: 1.2 });
 }
 
 /** "like snake" — scaffolding hint. */
-export async function sayLike(letter: SatpinLetter): Promise<void> {
+export async function sayLike(letter: Letter): Promise<void> {
   if (!engine.settings.narrator) return;
   const buf = await loadClip(likeUrl(letter));
   if (buf) return playBuffer(buf);
-  return say(`like ${SATPIN_ITEMS[letter].word}`, { rate: 0.9 });
+  return say(`like ${LETTER_ITEMS[letter].word}`, { rate: 0.9 });
+}
+
+/** Any word, e.g. a blending word: "cat!" */
+export async function sayAnyWord(word: string): Promise<void> {
+  if (!engine.settings.narrator) return;
+  const buf = await loadClip(anyWordUrl(word));
+  if (buf) return playBuffer(buf);
+  return say(`${word}!`, { pitch: 1.15 });
+}
+
+/**
+ * Says a word sound-by-sound for blending ("c… a… t"), calling `onSound`
+ * as each one starts so the matching letter tile can light up.
+ */
+export async function playSounds(letters: Letter[], onSound?: (i: number) => void, gapMs = 260): Promise<void> {
+  const ctx = engine.ensure();
+  if (!ctx) return;
+  for (let i = 0; i < letters.length; i++) {
+    onSound?.(i);
+    const buf = await loadClip(blendUrl(letters[i]));
+    if (buf) await playBuffer(buf);
+    else await playPhoneme(letters[i]);
+    if (i < letters.length - 1) await new Promise((r) => setTimeout(r, gapMs));
+  }
 }
 
 /** One of Munchy's spoken lines. */
@@ -489,7 +534,7 @@ export function stopVoice(): void {
 }
 
 /** Renders a phoneme offline – used to sanity-check levels in development. */
-export async function renderPhonemeOffline(letter: SatpinLetter): Promise<{ peak: number; rms: number; dur: number }> {
+export async function renderPhonemeOffline(letter: Letter): Promise<{ peak: number; rms: number; dur: number }> {
   const sr = 44100;
   const off = new OfflineAudioContext(1, sr * 1.2, sr);
   // Borrow a noise buffer for the offline context

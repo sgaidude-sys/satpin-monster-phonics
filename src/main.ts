@@ -1,18 +1,23 @@
 import './style.css';
 import './adventure.css';
-import { ANIMAL_STICKERS, SATPIN_ITEMS, SATPIN_LETTERS, type AnimalSticker, type SatpinLetter } from './data/phonics';
-import { HATS, LEVELS, MODE_INFO, type GameMode, type LevelDef } from './data/levels';
+import { ANIMAL_STICKERS, LETTER_GROUPS, LETTER_ITEMS, type AnimalSticker, type BlendWord, type Letter } from './data/phonics';
+import { HATS, LEVELS, MODE_INFO, WORLDS, type GameMode, type LevelDef } from './data/levels';
 import { engine, unlockAudio } from './audio/engine';
 import * as sfx from './audio/sfx';
 import { startMusic } from './audio/music';
-import { isNarratorSpeaking, playPhoneme, preloadVoice, sayLike, sayLine, sayWord, stopVoice, type LineKey } from './audio/voice';
+import { isNarratorSpeaking, playPhoneme, playSounds, preloadVoice, sayAnyWord, sayLike, sayLine, sayWord, stopVoice, type LineKey } from './audio/voice';
 import {
   completeLevel,
+  distractorsFor,
   loadProgression,
   MASTERY_TARGET,
   pickChoices,
   pickTarget,
+  pickWord,
+  pickWordChoices,
   recordAttempt,
+  shuffle,
+  soundsAlike,
   resetProgression,
   totalStars,
   update,
@@ -42,6 +47,8 @@ const ICON = {
 const MODE_ICON: Record<GameMode, string> = {
   feed: `<svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="19" fill="#f4b860" stroke="#26213f" stroke-width="3.5"/><circle cx="21" cy="21" r="12" fill="#f8cb80"/><circle cx="17" cy="18" r="3.2" fill="#5b3418"/><circle cx="29" cy="15" r="2.6" fill="#5b3418"/><circle cx="31" cy="28" r="3.4" fill="#5b3418"/><circle cx="18" cy="31" r="2.6" fill="#5b3418"/><circle cx="24" cy="24" r="2" fill="#5b3418"/></svg>`,
   bubble: `<svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="22" cy="27" r="17" fill="#c9eeff" stroke="#26213f" stroke-width="3.5"/><path d="M12 23a11 11 0 0 1 9-9" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round"/><circle cx="39" cy="11" r="6" fill="#c9eeff" stroke="#26213f" stroke-width="3"/></svg>`,
+  blend: `<svg viewBox="0 0 48 48" aria-hidden="true"><rect x="3" y="12" width="13" height="16" rx="4" fill="#ffb020" stroke="#26213f" stroke-width="3"/><rect x="18" y="12" width="13" height="16" rx="4" fill="#2ed47a" stroke="#26213f" stroke-width="3"/><rect x="33" y="12" width="12" height="16" rx="4" fill="#29b6f6" stroke="#26213f" stroke-width="3"/><path d="M8 37h30" stroke="#26213f" stroke-width="3.5" stroke-linecap="round"/><path d="M33 32l6 5-6 5" fill="none" stroke="#26213f" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  build: `<svg viewBox="0 0 48 48" aria-hidden="true"><rect x="5" y="26" width="17" height="17" rx="4" fill="#ff7ac6" stroke="#26213f" stroke-width="3"/><rect x="26" y="26" width="17" height="17" rx="4" fill="#ffd23f" stroke="#26213f" stroke-width="3"/><rect x="15" y="6" width="17" height="17" rx="4" fill="#7dd3fc" stroke="#26213f" stroke-width="3"/><path d="M20 14h7M10 34h7M31 34h7" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>`,
   egg: `<svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4C35 4 42 22 42 30c0 10-8 15-18 15S6 40 6 30C6 22 13 4 24 4z" fill="#fff6dc" stroke="#26213f" stroke-width="3.5"/><circle cx="18" cy="23" r="3" fill="#a78bfa"/><circle cx="30" cy="30" r="4" fill="#f9a8d4"/><circle cx="20" cy="36" r="2.5" fill="#7dd3fc"/><path d="M15 15a12 12 0 0 1 6-6" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>`,
 };
 
@@ -67,8 +74,8 @@ const STAR_SVG = `<svg viewBox="0 0 40 40" aria-hidden="true">
 const EGG_D = 'M50 4C78 4 96 50 96 76c0 26-20 40-46 40S4 102 4 76C4 50 22 4 50 4z';
 const CRACK_D = 'M6 58 L18 50 L28 60 L40 49 L50 60 L62 50 L72 61 L84 51 L94 58';
 
-function eggSvg(letter: SatpinLetter): string {
-  const item = SATPIN_ITEMS[letter];
+function eggSvg(letter: Letter): string {
+  const item = LETTER_ITEMS[letter];
   return `<svg viewBox="0 0 100 120" aria-hidden="true">
     <defs><radialGradient id="eg-${letter}" cx=".35" cy=".28" r=".85">
       <stop offset="0" stop-color="#ffffff"/><stop offset=".55" stop-color="${item.tint}"/><stop offset="1" stop-color="${item.accent}" stop-opacity=".45"/>
@@ -109,7 +116,8 @@ const rand = (a: number, b: number) => a + Math.random() * (b - a);
 
 interface DragState {
   card: HTMLButtonElement;
-  letter: SatpinLetter;
+  key: string;
+  accent: string;
   index: number;
   pointerId: number;
   startX: number;
@@ -126,7 +134,7 @@ interface DragState {
 
 interface Bubble {
   el: HTMLButtonElement;
-  letter: SatpinLetter;
+  letter: Letter;
   x: number;
   y: number;
   r: number;
@@ -152,7 +160,7 @@ class PhonicsGame {
   private run = 0;
   private round = 0;
   private mistakes = 0;
-  private target: SatpinLetter = 's';
+  private target: Letter = 's';
   private wrongThisRound = 0;
   private streak = 0;
   private locked = true;
@@ -162,6 +170,11 @@ class PhonicsGame {
   private idleTimer: number | undefined;
   private drag: DragState | null = null;
   private burpedLast = false;
+
+  // Blending modes
+  private word: BlendWord | null = null;
+  private buildIndex = 0;
+  private roundStartMistakes = 0;
 
   // Egg mode
   private hatchEgg: HTMLElement | null = null;
@@ -555,6 +568,18 @@ class PhonicsGame {
       return `<span class="decor" style="left:${x}px;top:${y}px;font-size:${34 + ((i * 13) % 20)}px">${DECOR[i % DECOR.length]}</span>`;
     }).join('');
 
+    // A signpost where each new world (letter group) begins
+    const signs = LEVELS.map((lv, i) => {
+      if (i > 0 && LEVELS[i - 1].world === lv.world) return '';
+      const wd = WORLDS[lv.world];
+      const p = pts[i];
+      const side = p.x > W / 2 ? -1 : 1;
+      const x = clamp(p.x + side * 150, 90, W - 90);
+      const letters = LETTER_GROUPS[lv.world].join(' ');
+      return `<div class="world-sign" style="left:${x}px;top:${p.y + 40}px;--c:${wd.color}">
+          <b>${wd.emoji} ${wd.name}</b><small>${letters}</small></div>`;
+    }).join('');
+
     const nodes = LEVELS.map((lv, i) => {
       const stars = this.state.levelStars[i];
       const locked = i > this.state.unlockedLevel;
@@ -577,6 +602,7 @@ class PhonicsGame {
         <path d="${d}" class="road-dash"/>
       </svg>
       ${decor}
+      ${signs}
       ${nodes}
       <div class="node trophy ${allDone ? 'is-done' : 'is-locked'}" style="left:${trophy.x}px;top:${trophy.y}px" aria-label="Trophy">🏆</div>
     `;
@@ -704,10 +730,12 @@ class PhonicsGame {
   }
 
   private renderHint(): void {
-    const item = SATPIN_ITEMS[this.target];
+    const item = LETTER_ITEMS[this.target];
     this.el.hintBubble.classList.toggle('show', this.hint && this.screen === 'level');
     this.el.hintBubble.style.setProperty('--accent', item.accent);
-    this.el.hintBubble.querySelector('span')!.textContent = this.target;
+    const isWord = (this.level.mode === 'blend' || this.level.mode === 'build') && !!this.word;
+    this.el.hintBubble.querySelector('span')!.textContent = isWord ? this.word!.word : this.target;
+    this.el.hintBubble.classList.toggle('is-word', isWord);
     this.el.hintBtn.classList.toggle('is-on', this.hint);
     this.el.hintBtn.setAttribute('aria-pressed', String(this.hint));
     this.el.playfield.classList.toggle('show-hint', this.hint);
@@ -831,6 +859,14 @@ class PhonicsGame {
       pf.innerHTML = '<div class="cards" id="cards"></div>';
     } else if (this.level.mode === 'egg') {
       pf.innerHTML = '<div class="eggs" id="eggs"></div><div class="nest"></div>';
+    } else if (this.level.mode === 'blend') {
+      pf.innerHTML = '<div class="sound-tiles" id="tiles"></div><div class="cards pics" id="cards"></div>';
+    } else if (this.level.mode === 'build') {
+      pf.innerHTML = `<div class="build-board">
+          <div class="build-pic" id="build-pic"></div>
+          <div class="slots" id="slots"></div>
+          <div class="letter-tiles" id="letter-tiles"></div>
+        </div>`;
     } else {
       pf.innerHTML = `<div class="bubble-field" id="bubble-field"></div>
         <div class="pop-counter" id="pop-counter" aria-live="polite"></div>`;
@@ -845,12 +881,21 @@ class PhonicsGame {
       return;
     }
     this.wrongThisRound = 0;
-    this.target = pickTarget(this.state, this.level.letters, this.target);
-    this.renderHint();
+    this.roundStartMistakes = this.mistakes;
     const mode = this.level.mode;
-    if (mode === 'feed') this.renderCards(pickChoices(this.target, this.level.letters, 3));
+    if (mode === 'blend' || mode === 'build') {
+      this.word = pickWord(this.level, this.word?.word);
+      this.target = this.word.letters[0];
+      this.buildIndex = 0;
+    } else {
+      this.target = pickTarget(this.state, this.level.letters, this.target);
+    }
+    this.renderHint();
+    if (mode === 'blend') this.renderBlend(this.word!);
+    else if (mode === 'build') this.renderBuild(this.word!);
+    else if (mode === 'feed') this.renderCards(pickChoices(this.target, this.level.letters, 3));
     else if (mode === 'egg') this.renderEggs(pickChoices(this.target, this.level.letters, 3));
-    else {
+    else if (mode === 'bubble') {
       this.pops = 0;
       this.bubbleRoundActive = true;
       this.renderPopCounter();
@@ -862,11 +907,25 @@ class PhonicsGame {
     this.sayTarget();
   }
 
-  private async sayTarget(): Promise<void> {
+  /** Plays the prompt for the current round. `full` = include the whole word in Word Builder. */
+  private async sayTarget(full = true): Promise<void> {
     const token = ++this.sayToken;
     this.el.listen.classList.add('is-playing');
-    this.monster.setMood('speaking', 5);
-    await playPhoneme(this.target);
+    this.monster.setMood('speaking', 8);
+    const mode = this.level.mode;
+    if (mode === 'blend' && this.word) {
+      await this.presentBlend(token);
+    } else if (mode === 'build' && this.word) {
+      if (full) {
+        await sayAnyWord(this.word.word);
+        if (token !== this.sayToken) return;
+        await wait(250);
+      }
+      if (token !== this.sayToken) return;
+      await playSounds([this.target]);
+    } else {
+      await playPhoneme(this.target);
+    }
     if (token !== this.sayToken) return;
     this.el.listen.classList.remove('is-playing');
     if (this.monster.getMood() === 'speaking') this.monster.setMood('idle');
@@ -881,7 +940,7 @@ class PhonicsGame {
       this.el.listen.classList.remove('nudge');
       void this.el.listen.offsetWidth;
       this.el.listen.classList.add('nudge');
-      this.sayTarget();
+      this.sayTarget(false);
     }, 10000);
   }
 
@@ -916,14 +975,18 @@ class PhonicsGame {
   }
 
   private markCorrect(): void {
-    this.state = recordAttempt(this.state, this.target, true);
+    if (this.level.mode === 'blend' && this.word) {
+      for (const l of this.word.letters) this.state = recordAttempt(this.state, l, true);
+    } else {
+      this.state = recordAttempt(this.state, this.target, true);
+    }
     if (this.wrongThisRound === 0) this.streak++;
     else this.streak = 0;
   }
 
   /** Shared wrong-answer handling. */
   private async onWrong(run: number, opts: { replay?: boolean } = {}): Promise<void> {
-    this.state = recordAttempt(this.state, this.target, false);
+    if (this.level.mode !== 'blend') this.state = recordAttempt(this.state, this.target, false);
     this.wrongThisRound++;
     this.mistakes++;
     this.streak = 0;
@@ -940,28 +1003,49 @@ class PhonicsGame {
       this.showAnswerHint();
       const token = ++this.sayToken;
       this.el.listen.classList.add('is-playing');
-      this.monster.setMood('speaking', 4);
-      await playPhoneme(this.target);
-      if (token === this.sayToken && this.alive(run)) await sayLike(this.target);
+      this.monster.setMood('speaking', 6);
+      if (this.level.mode === 'blend' && this.word) {
+        // Model the blend: sounds, then the whole word
+        await this.presentBlend(token);
+        if (token === this.sayToken && this.alive(run)) await sayAnyWord(this.word.word);
+      } else {
+        await playPhoneme(this.target);
+        if (token === this.sayToken && this.alive(run)) await sayLike(this.target);
+      }
       if (token === this.sayToken) {
         this.el.listen.classList.remove('is-playing');
         this.monster.setMood('idle');
       }
       this.bumpIdle();
     } else {
-      this.sayTarget();
+      this.sayTarget(false);
     }
   }
 
   private showAnswerHint(): void {
-    this.el.playfield
-      .querySelectorAll<HTMLElement>(`[data-letter="${this.target}"]`)
-      .forEach((e) => e.classList.add('is-hint'));
+    const sel =
+      this.level.mode === 'blend' && this.word
+        ? `[data-word="${this.word.word}"]`
+        : this.level.mode === 'build'
+          ? `.ltile[data-letter="${this.target}"]:not(:disabled)`
+          : `[data-letter="${this.target}"]`;
+    this.el.playfield.querySelectorAll<HTMLElement>(sel).forEach((e) => e.classList.add('is-hint'));
   }
 
   /** "sss… snake!" plus praise. */
   private async celebrateSound(run: number): Promise<void> {
-    this.monster.setMood('speaking', 4);
+    this.monster.setMood('speaking', 6);
+    if (this.level.mode === 'blend' && this.word) {
+      // Sounds quickly, sliding together, then the word
+      this.el.playfield.querySelector('#tiles')?.classList.add('blended');
+      await playSounds(this.word.letters, (i) => this.lightTile(i), 60);
+      if (!this.alive(run)) return;
+      await sayAnyWord(this.word.word);
+      if (!this.alive(run)) return;
+      if (this.streak >= 3 && Math.random() < 0.5) await sayLine(pick(['great', 'welldone'] as const));
+      this.monster.setMood('happy', 0.8);
+      return;
+    }
     await playPhoneme(this.target);
     if (!this.alive(run)) return;
     await sayWord(this.target);
@@ -974,11 +1058,11 @@ class PhonicsGame {
   /*  Mode: Feed Munchy (cards)                                        */
   /* ---------------------------------------------------------------- */
 
-  private renderCards(choices: SatpinLetter[]): void {
+  private renderCards(choices: Letter[]): void {
     const wrap = this.el.playfield.querySelector('#cards')!;
     wrap.innerHTML = '';
     choices.forEach((letter, i) => {
-      const item = SATPIN_ITEMS[letter];
+      const item = LETTER_ITEMS[letter];
       const slot = document.createElement('div');
       slot.className = 'card-slot deal';
       slot.style.setProperty('--deal-rot', `${(i - 1) * 14 - 4}deg`);
@@ -1006,7 +1090,7 @@ class PhonicsGame {
     });
   }
 
-  private bindCard(card: HTMLButtonElement, letter: SatpinLetter, index: number): void {
+  private bindCard(card: HTMLButtonElement, key: string, index: number): void {
     card.addEventListener('pointerenter', (e) => {
       if (!this.locked && !this.drag && e.pointerType === 'mouse') sfx.sfxHover(index);
     });
@@ -1032,7 +1116,8 @@ class PhonicsGame {
       }
       this.drag = {
         card,
-        letter,
+        key,
+        accent: card.style.getPropertyValue('--accent') || '#ffd43b',
         index,
         pointerId: e.pointerId,
         startX: e.clientX,
@@ -1050,7 +1135,7 @@ class PhonicsGame {
     card.addEventListener('pointerup', (e) => this.onDragEnd(e, false));
     card.addEventListener('pointercancel', (e) => this.onDragEnd(e, true));
     card.addEventListener('click', (e) => {
-      if (e.detail === 0 && !this.locked) this.feed(card, letter);
+      if (e.detail === 0 && !this.locked) this.feed(card, key);
     });
   }
 
@@ -1082,7 +1167,7 @@ class PhonicsGame {
     d.trailAcc += dt;
     if (d.trailAcc > 30) {
       d.trailAcc = 0;
-      this.fx.trail(cx, cy, SATPIN_ITEMS[d.letter].accent);
+      this.fx.trail(cx, cy, d.accent);
     }
   }
 
@@ -1092,14 +1177,14 @@ class PhonicsGame {
     this.drag = null;
     this.monster.setHunger(0);
     if (!d.moved) {
-      if (!cancelled) this.feed(d.card, d.letter);
+      if (!cancelled) this.feed(d.card, d.key);
       return;
     }
     const cx = d.home.left + d.home.width / 2 + d.dx;
     const cy = d.home.top + d.home.height / 2 + d.dy;
     const mouth = this.monster.getMouthScreenPosition();
     const radius = Math.max(110, this.monster.getUnitPx() * 1.1);
-    if (!cancelled && Math.hypot(mouth.x - cx, mouth.y - cy) < radius) this.feed(d.card, d.letter);
+    if (!cancelled && Math.hypot(mouth.x - cx, mouth.y - cy) < radius) this.feed(d.card, d.key);
     else this.springBack(d.card);
   }
 
@@ -1148,7 +1233,7 @@ class PhonicsGame {
     return { dx, dy };
   }
 
-  private async feed(card: HTMLButtonElement, letter: SatpinLetter): Promise<void> {
+  private async feed(card: HTMLButtonElement, key: string): Promise<void> {
     if (this.locked) return;
     const run = this.run;
     this.locked = true;
@@ -1159,12 +1244,13 @@ class PhonicsGame {
     const pos = await this.flyToMouth(card);
     this.monster.setHunger(0);
     if (!this.alive(run)) return;
-    if (letter === this.target) await this.feedCorrect(run, card);
+    const right = this.level.mode === 'blend' ? key === this.word?.word : key === this.target;
+    if (right) await this.feedCorrect(run, card);
     else await this.feedWrong(run, card, pos);
   }
 
   private async feedCorrect(run: number, card: HTMLButtonElement): Promise<void> {
-    const item = SATPIN_ITEMS[this.target];
+    const item = LETTER_ITEMS[this.target];
     const mouth = this.monster.getMouthScreenPosition();
     card.style.opacity = '0';
     this.markCorrect();
@@ -1252,16 +1338,259 @@ class PhonicsGame {
   }
 
   /* ---------------------------------------------------------------- */
+  /*  Mode: Blend It! — hear "c… a… t", feed Munchy the right picture  */
+  /* ---------------------------------------------------------------- */
+
+  private renderBlend(word: BlendWord): void {
+    const tiles = this.el.playfield.querySelector<HTMLElement>('#tiles')!;
+    tiles.classList.remove('blended', 'swoosh');
+    tiles.innerHTML =
+      word.letters
+        .map((l, i) => {
+          const it = LETTER_ITEMS[l];
+          return `<span class="tile" data-i="${i}" style="--accent:${it.accent};--accent-dark:${it.accentDark};animation-delay:${i * 0.08}s">${l}</span>`;
+        })
+        .join('') + '<span class="blend-arrow" aria-hidden="true"></span>';
+
+    // Picture cards use neutral colours so the colour never gives the answer away
+    const neutral: [string, string, string][] = [
+      ['#ffb020', '#c98400', '#fff8e6'],
+      ['#29b6f6', '#0277bd', '#eef9ff'],
+      ['#9b6dff', '#5b3df5', '#f4f0ff'],
+    ];
+    const wrap = this.el.playfield.querySelector('#cards')!;
+    wrap.innerHTML = '';
+    pickWordChoices(word, this.level).forEach((w, i) => {
+      const [accent, dark, tint] = neutral[i % neutral.length];
+      const slot = document.createElement('div');
+      slot.className = 'card-slot deal';
+      slot.style.setProperty('--deal-rot', `${(i - 1) * 14 - 4}deg`);
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'card pic';
+      card.dataset.word = w.word;
+      card.style.setProperty('--accent', accent);
+      card.style.setProperty('--accent-dark', dark);
+      card.style.setProperty('--tint', tint);
+      card.style.setProperty('--bob-delay', `${i * -0.7}s`);
+      card.style.animationDelay = `${i * 0.11 + 0.2}s`;
+      card.setAttribute('aria-label', w.word);
+      card.innerHTML = `<div class="card-art"><div class="art-disc">${w.svg}</div></div>`;
+      card.addEventListener('animationend', (e) => {
+        if (e.animationName === 'deal') slot.classList.remove('deal');
+      });
+      slot.appendChild(card);
+      wrap.appendChild(slot);
+      setTimeout(() => sfx.sfxDeal(i), i * 110 + 200);
+      this.bindCard(card, w.word, i);
+    });
+  }
+
+  private lightTile(i: number): void {
+    const t = this.el.playfield.querySelector<HTMLElement>(`#tiles .tile[data-i="${i}"]`);
+    if (!t) return;
+    t.classList.remove('lit');
+    void t.offsetWidth;
+    t.classList.add('lit');
+    setTimeout(() => t.classList.remove('lit'), 650);
+  }
+
+  /** Says the word sound by sound while each letter tile bounces, then sweeps an arrow under them. */
+  private async presentBlend(token: number): Promise<void> {
+    if (!this.word) return;
+    const tiles = this.el.playfield.querySelector<HTMLElement>('#tiles');
+    tiles?.classList.remove('blended');
+    await playSounds(this.word.letters, (i) => this.lightTile(i), 320);
+    if (token !== this.sayToken) return;
+    await wait(200);
+    if (!tiles) return;
+    tiles.classList.remove('swoosh');
+    void tiles.offsetWidth;
+    tiles.classList.add('swoosh');
+    sfx.sfxWhoosh(0.3);
+  }
+
+  /* ---------------------------------------------------------------- */
+  /*  Mode: Word Builder — tap the sounds in order to build the word   */
+  /* ---------------------------------------------------------------- */
+
+  private renderBuild(word: BlendWord): void {
+    const pf = this.el.playfield;
+    const pic = pf.querySelector<HTMLElement>('#build-pic')!;
+    pic.getAnimations().forEach((a) => a.cancel());
+    pic.innerHTML = word.svg;
+    pic.style.opacity = '';
+    pic.classList.remove('done');
+    pic.animate([{ scale: '0.3', opacity: 0 }, { scale: '1.1', opacity: 1, offset: 0.7 }, { scale: '1', opacity: 1 }], {
+      duration: 500,
+      easing: 'cubic-bezier(0.34, 1.56, 0.64, 1)',
+    });
+
+    const slots = pf.querySelector<HTMLElement>('#slots')!;
+    slots.classList.remove('complete');
+    slots.innerHTML = word.letters.map((_, i) => `<span class="slot ${i === 0 ? 'active' : ''}" data-i="${i}"></span>`).join('');
+
+    const extra = this.level.world >= 2 ? 2 : 1;
+    const pool = shuffle(
+      this.level.letters.filter((l) => !word.letters.includes(l) && !word.letters.some((w) => soundsAlike(w, l)))
+    );
+    const letters = shuffle([...word.letters, ...pool.slice(0, extra)]);
+    const tiles = pf.querySelector<HTMLElement>('#letter-tiles')!;
+    tiles.innerHTML = '';
+    letters.forEach((l, i) => {
+      const it = LETTER_ITEMS[l];
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'ltile';
+      b.dataset.letter = l;
+      b.style.setProperty('--accent', it.accent);
+      b.style.setProperty('--accent-dark', it.accentDark);
+      b.style.animationDelay = `${i * 0.07}s`;
+      b.textContent = l;
+      b.setAttribute('aria-label', `letter ${l}`);
+      b.addEventListener('click', () => this.onTileTap(b, l));
+      tiles.appendChild(b);
+      setTimeout(() => sfx.sfxDeal(i % 3), i * 90 + 60);
+    });
+  }
+
+  private async onTileTap(tile: HTMLButtonElement, letter: Letter): Promise<void> {
+    unlockAudio();
+    if (this.locked || !this.word || tile.disabled) return;
+    const run = this.run;
+    this.clearIdle();
+    const need = this.word.letters[this.buildIndex];
+    if (letter !== need) {
+      sfx.sfxBonk();
+      tile.classList.remove('nope');
+      void tile.offsetWidth;
+      tile.classList.add('nope');
+      this.monster.setMood('yuck', 0.5);
+      await this.onWrong(run);
+      return;
+    }
+
+    this.locked = true;
+    this.sayToken++;
+    this.el.listen.classList.remove('is-playing');
+    stopVoice();
+    tile.disabled = true;
+    tile.classList.remove('is-hint');
+    const slot = this.el.playfield.querySelector<HTMLElement>(`.slot[data-i="${this.buildIndex}"]`)!;
+    const a = tile.getBoundingClientRect();
+    const b = slot.getBoundingClientRect();
+    tile.classList.add('used');
+    sfx.sfxPickup(1);
+    const fly = tile.animate(
+      [
+        { translate: '0px 0px', scale: '1' },
+        { translate: `${b.left - a.left + (b.width - a.width) / 2}px ${b.top - a.top + (b.height - a.height) / 2}px`, scale: '1.05' },
+      ],
+      { duration: 320, easing: 'cubic-bezier(0.3, 0.8, 0.4, 1)', fill: 'forwards' }
+    );
+    await Promise.race([fly.finished.catch(() => {}), wait(500)]);
+    const it = LETTER_ITEMS[letter];
+    slot.textContent = letter;
+    slot.style.setProperty('--accent', it.accent);
+    slot.style.setProperty('--accent-dark', it.accentDark);
+    slot.classList.add('filled');
+    slot.classList.remove('active');
+    tile.style.visibility = 'hidden';
+    sfx.sfxBubblePop(1 + this.buildIndex * 0.15);
+    this.state = recordAttempt(this.state, letter, true);
+    const r = slot.getBoundingClientRect();
+    this.fx.burst(r.left + r.width / 2, r.top + r.height / 2, it.accent, 12);
+    this.monster.setMood('speaking', 1.2);
+    await playSounds([letter]);
+    if (!this.alive(run)) return;
+
+    this.buildIndex++;
+    this.wrongThisRound = 0;
+    if (this.buildIndex >= this.word.letters.length) {
+      await this.buildComplete(run);
+      return;
+    }
+    this.target = this.word.letters[this.buildIndex];
+    this.renderHint();
+    this.el.playfield.querySelector(`.slot[data-i="${this.buildIndex}"]`)?.classList.add('active');
+    this.locked = false;
+    await wait(200);
+    if (this.alive(run)) this.sayTarget(false);
+  }
+
+  private async buildComplete(run: number): Promise<void> {
+    const word = this.word!;
+    this.locked = true;
+    if (this.mistakes === this.roundStartMistakes) this.streak++;
+    else this.streak = 0;
+    const accent = LETTER_ITEMS[word.letters[0]].accent;
+    const slots = this.el.playfield.querySelector<HTMLElement>('#slots')!;
+    slots.classList.add('complete');
+    const pic = this.el.playfield.querySelector<HTMLElement>('#build-pic')!;
+    const pr = pic.getBoundingClientRect();
+    sfx.sfxCorrect(this.streak);
+    this.fx.burst(pr.left + pr.width / 2, pr.top + pr.height / 2, accent, 30);
+
+    // Blend it: each slot lights as its sound plays, then the whole word
+    this.monster.setMood('speaking', 6);
+    await playSounds(
+      word.letters,
+      (i) => {
+        const sl = slots.querySelector<HTMLElement>(`.slot[data-i="${i}"]`);
+        if (!sl) return;
+        sl.classList.remove('lit');
+        void sl.offsetWidth;
+        sl.classList.add('lit');
+      },
+      70
+    );
+    if (!this.alive(run)) return;
+    await sayAnyWord(word.word);
+    if (!this.alive(run)) return;
+
+    // Munchy gobbles up the picture
+    const mouth = this.monster.getMouthScreenPosition();
+    pic.classList.add('done');
+    this.monster.setHunger(1, mouth.x, mouth.y + 40);
+    sfx.sfxWhoosh(0.4);
+    const fly = pic.animate(
+      [
+        { translate: '0px 0px', scale: '1', rotate: '0deg' },
+        { translate: `${mouth.x - (pr.left + pr.width / 2)}px ${mouth.y - (pr.top + pr.height / 2)}px`, scale: '0.15', rotate: '30deg' },
+      ],
+      { duration: 450, easing: 'cubic-bezier(0.45, 0, 0.8, 0.6)', fill: 'forwards' }
+    );
+    await Promise.race([fly.finished.catch(() => {}), wait(700)]);
+    this.monster.setHunger(0);
+    pic.style.opacity = '0';
+    this.monster.setMood('chewing', 0.8);
+    sfx.sfxMunch();
+    for (let i = 0; i < 3; i++) setTimeout(() => this.fx.crumbs(mouth.x, mouth.y, accent, 7), i * 170);
+    this.fx.text(mouth.x, mouth.y - this.monster.getUnitPx() * 1.6, pick(PRAISE), accent, 52);
+    this.showStreak();
+    await wait(850);
+    if (!this.alive(run)) return;
+    this.monster.setMood('happy', 1.4);
+    const star = this.awardStar(mouth.x, mouth.y - 30);
+    if (this.streak >= 3 && Math.random() < 0.5) await sayLine('welldone');
+    await star;
+    if (!this.alive(run)) return;
+    await wait(400);
+    this.nextRound(run);
+  }
+
+
+  /* ---------------------------------------------------------------- */
   /*  Mode: Egg Hatch                                                  */
   /* ---------------------------------------------------------------- */
 
-  private renderEggs(choices: SatpinLetter[]): void {
+  private renderEggs(choices: Letter[]): void {
     const wrap = this.el.playfield.querySelector('#eggs')!;
     wrap.innerHTML = '';
     this.hatchEgg = null;
     this.hatchStage = 0;
     choices.forEach((letter, i) => {
-      const item = SATPIN_ITEMS[letter];
+      const item = LETTER_ITEMS[letter];
       const slot = document.createElement('div');
       slot.className = 'egg-slot deal';
       slot.style.setProperty('--deal-rot', `${(i - 1) * 10}deg`);
@@ -1289,7 +1618,7 @@ class PhonicsGame {
     });
   }
 
-  private async onEggTap(egg: HTMLElement, letter: SatpinLetter): Promise<void> {
+  private async onEggTap(egg: HTMLElement, letter: Letter): Promise<void> {
     unlockAudio();
     const run = this.run;
     if (this.hatchEgg) {
@@ -1333,7 +1662,7 @@ class PhonicsGame {
     if (this.hatchStage < 3) {
       sfx.sfxCrack(this.hatchStage);
       this.fx.crumbs(r.left + r.width / 2, r.top + r.height * 0.45, '#ffffff', 5);
-      this.fx.text(r.left + r.width / 2, r.top - 10, this.hatchStage === 1 ? 'Tap!' : 'Tap tap!', SATPIN_ITEMS[this.target].accent, 34);
+      this.fx.text(r.left + r.width / 2, r.top - 10, this.hatchStage === 1 ? 'Tap!' : 'Tap tap!', LETTER_ITEMS[this.target].accent, 34);
       // Keep things moving if the child waits
       this.hatchTimer = window.setTimeout(() => this.crackEgg(run), 2600);
     } else {
@@ -1342,7 +1671,7 @@ class PhonicsGame {
   }
 
   private async hatch(run: number, egg: HTMLElement): Promise<void> {
-    const item = SATPIN_ITEMS[this.target];
+    const item = LETTER_ITEMS[this.target];
     egg.classList.add('hatched');
     sfx.sfxHatch();
     const r = egg.getBoundingClientRect();
@@ -1373,7 +1702,7 @@ class PhonicsGame {
   private renderPopCounter(): void {
     const el = this.el.playfield.querySelector('#pop-counter');
     if (!el) return;
-    const item = SATPIN_ITEMS[this.target];
+    const item = LETTER_ITEMS[this.target];
     el.innerHTML = Array.from({ length: this.popsNeeded }, (_, i) => `<span class="${i < this.pops ? 'on' : ''}" style="--accent:${item.accent}"></span>`).join('');
   }
 
@@ -1404,10 +1733,10 @@ class PhonicsGame {
     if (!w || !h) return;
     const alive = this.bubbles.filter((b) => !b.dead);
     const targetsVisible = alive.filter((b) => b.letter === this.target && b.y > 0).length;
-    const others = this.level.letters.filter((l) => l !== this.target);
+    const others = distractorsFor(this.target, this.level.letters);
     const wantTarget = this.bubbleRoundActive && (targetsVisible < 2 || Math.random() < 0.4);
     const letter = wantTarget || !others.length ? this.target : pick(others);
-    const item = SATPIN_ITEMS[letter];
+    const item = LETTER_ITEMS[letter];
     const r = clamp(Math.min(w, h * 1.4) * 0.1, 36, 64);
     // Avoid spawning right on top of the previous bubble
     let x = rand(r, w - r);
@@ -1468,7 +1797,7 @@ class PhonicsGame {
     const r = b.el.getBoundingClientRect();
     const cx = r.left + r.width / 2;
     const cy = r.top + r.height / 2;
-    const item = SATPIN_ITEMS[b.letter];
+    const item = LETTER_ITEMS[b.letter];
     if (b.letter !== this.target) {
       sfx.sfxBonk();
       b.el.classList.remove('nope');
@@ -1763,14 +2092,19 @@ class PhonicsGame {
         <span class="name">${have ? s.name : '???'}</span>
       </div>`;
     }).join('');
-    const mastery = SATPIN_LETTERS.map((l) => {
-      const item = SATPIN_ITEMS[l];
-      const c = Math.min(MASTERY_TARGET, this.state.mastery[l].correct);
-      const stars = Array.from({ length: MASTERY_TARGET }, (_, i) => `<i class="${i < c ? 'on' : ''}">★</i>`).join('');
-      return `<div class="mastery-row" style="--accent:${item.accent};--tint:${item.tint}">
-        <div class="letter"><span>${l}</span></div>
-        <div><div class="word">${item.word}</div><div class="mini-stars">${stars}</div></div>
-      </div>`;
+    const mastery = LETTER_GROUPS.map((group, g) => {
+      const rows = group
+        .map((l) => {
+          const item = LETTER_ITEMS[l];
+          const c = Math.min(MASTERY_TARGET, this.state.mastery[l].correct);
+          const stars = Array.from({ length: MASTERY_TARGET }, (_, i) => `<i class="${i < c ? 'on' : ''}">★</i>`).join('');
+          return `<div class="mastery-row" style="--accent:${item.accent};--tint:${item.tint}">
+            <div class="letter"><span>${l}</span></div>
+            <div><div class="word">${item.word}</div><div class="mini-stars">${stars}</div></div>
+          </div>`;
+        })
+        .join('');
+      return `<div class="mastery-group"><div class="mastery-head" style="--c:${WORLDS[g].color}">${WORLDS[g].emoji} ${WORLDS[g].name}</div><div class="mastery-list">${rows}</div></div>`;
     }).join('');
     this.openModal(
       'book',
@@ -1780,7 +2114,7 @@ class PhonicsGame {
         <p class="book-sub">Open treasure chests to find stickers! · ${this.state.totalCorrect} sounds found</p>
         <div class="book-grid">${stickers}</div>
         <div class="book-section">My Sounds</div>
-        <div class="mastery-list">${mastery}</div>
+        ${mastery}
       </div>`
     );
     q(this.el.modal, '#btn-close').addEventListener('click', () => this.closeModal());
