@@ -43,9 +43,42 @@ const BODY_MID = '#2fcdb6';
 const BODY_DARK = '#13978d';
 const BELLY = '#dcfff7';
 
+interface WorldRim {
+  rim: string;
+  aura: string;
+  bounce: string;
+}
+
+const WORLD_RIMS: WorldRim[] = [
+  { rim: 'rgba(255, 248, 200, 0.72)', aura: 'rgba(255, 232, 130, 0.22)', bounce: 'rgba(130, 220, 110, 0.18)' },
+  { rim: 'rgba(255, 205, 240, 0.76)', aura: 'rgba(255, 160, 220, 0.28)', bounce: 'rgba(195, 130, 255, 0.2)' },
+  { rim: 'rgba(175, 246, 255, 0.78)', aura: 'rgba(120, 225, 255, 0.25)', bounce: 'rgba(255, 220, 145, 0.22)' },
+  { rim: 'rgba(220, 190, 255, 0.85)', aura: 'rgba(170, 130, 255, 0.36)', bounce: 'rgba(110, 230, 200, 0.22)' },
+];
+
+let furPatternCanvas: HTMLCanvasElement | null = null;
+function getFurTile(): HTMLCanvasElement {
+  if (furPatternCanvas) return furPatternCanvas;
+  const s = 64;
+  const c = document.createElement('canvas');
+  c.width = c.height = s;
+  const g = c.getContext('2d')!;
+  for (let i = 0; i < 180; i++) {
+    const x = Math.random() * s;
+    const y = Math.random() * s;
+    g.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,255,0.065)' : 'rgba(10,60,65,0.05)';
+    g.beginPath();
+    g.ellipse(x, y, 2.2, 0.9, (Math.random() - 0.5) * 0.8, 0, Math.PI * 2);
+    g.fill();
+  }
+  furPatternCanvas = c;
+  return c;
+}
+
 interface Options {
   idleMood?: MonsterMood;
   sizeFactor?: number;
+  onLand?: (x: number, y: number, impact: number) => void;
 }
 
 export class MonsterCanvasController {
@@ -94,6 +127,9 @@ export class MonsterCanvasController {
   private eyeScreen = { x: 0, y: 0 };
   private unit = 100;
   private hat: string | null = null;
+  private worldIndex = 0;
+  private furPattern: CanvasPattern | null = null;
+  private feetScreen = { x: 0, y: 0 };
   private spinT = 0;
   private ro: ResizeObserver;
   private onPointer = (e: PointerEvent) => {
@@ -105,6 +141,7 @@ export class MonsterCanvasController {
   constructor(canvas: HTMLCanvasElement, opts: Options = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
+    this.furPattern = this.ctx.createPattern(getFurTile(), 'repeat');
     this.opts = opts;
     this.mood = opts.idleMood ?? 'idle';
     this.ro = new ResizeObserver(() => this.resize());
@@ -142,6 +179,11 @@ export class MonsterCanvasController {
       this.kick(-0.2, 0.25);
       this.tuft.vel += 6;
     }
+  }
+
+  /** Syncs Munchy's rim light & ambient bounce glow with the active 3D World biome. */
+  setWorld(worldIndex: number): void {
+    this.worldIndex = Math.max(0, Math.min(WORLD_RIMS.length - 1, worldIndex));
   }
 
   /** A full twirl. */
@@ -270,6 +312,9 @@ export class MonsterCanvasController {
         this.jumpV = 0;
         this.kick(0.4 * impact, -0.45 * impact);
         this.tuft.vel -= 10 * impact;
+        if (impact > 0.2 && this.feetScreen.x > 0) {
+          this.opts.onLand?.(this.feetScreen.x, this.feetScreen.y, impact);
+        }
       }
     }
     this.tuft.vel += (this.jumpY - prevY) * 60;
@@ -476,11 +521,28 @@ export class MonsterCanvasController {
     const ground = h * 0.93;
     const jy = this.jumpY * u;
 
-    // Ground shadow
+    // Ground shadow + store feet anchor for landing dust puffs
+    const rect = this.canvas.getBoundingClientRect();
+    this.feetScreen = { x: rect.left + cx, y: rect.top + ground };
     const lift = Math.min(1, -this.jumpY / 0.6);
-    ctx.fillStyle = `rgba(20, 60, 50, ${0.22 - lift * 0.1})`;
+    const rimSpec = WORLD_RIMS[this.worldIndex];
+    const shadowGrad = ctx.createRadialGradient(cx, ground, u * 0.08, cx, ground, u * 0.92 * (1 - lift * 0.3));
+    shadowGrad.addColorStop(0, `rgba(14, 48, 44, ${0.32 - lift * 0.14})`);
+    shadowGrad.addColorStop(1, 'rgba(14, 48, 44, 0)');
+    ctx.fillStyle = shadowGrad;
     ctx.beginPath();
-    ctx.ellipse(cx, ground, u * 0.85 * (1 - lift * 0.3), u * 0.13 * (1 - lift * 0.3), 0, 0, Math.PI * 2);
+    ctx.ellipse(cx, ground, u * 0.92 * (1 - lift * 0.3), u * 0.15 * (1 - lift * 0.3), 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Subtle atmospheric world backlight aura for silhouette pop
+    const auraBoost = this.mood === 'happy' || this.mood === 'dance' ? 1.55 : 1;
+    const auraR = u * 1.48 * auraBoost;
+    const aura = ctx.createRadialGradient(cx, ground + jy - u * 1.05, u * 0.25, cx, ground + jy - u * 1.05, auraR);
+    aura.addColorStop(0, rimSpec.aura);
+    aura.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = aura;
+    ctx.beginPath();
+    ctx.arc(cx, ground + jy - u * 1.05, auraR, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.save();
@@ -582,15 +644,34 @@ export class MonsterCanvasController {
       ctx.arc(sx * u, cy + sy * u, sr * u, 0, Math.PI * 2);
       ctx.fill();
     }
-    // Rim light
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
-    ctx.lineWidth = 0.05 * u;
+    // Rim light (tinted to match the active 3D world lighting)
+    const rimSpec = WORLD_RIMS[this.worldIndex];
+    if (this.furPattern) {
+      ctx.fillStyle = this.furPattern;
+      ctx.fillRect(-1.1 * u, cy - 1.1 * u, 2.2 * u, 2.2 * u);
+    }
+    // Soft ground bounce light on lower edge
+    const bounce = ctx.createLinearGradient(0, cy + 0.55 * u, 0, cy + 0.96 * u);
+    bounce.addColorStop(0, 'rgba(255,255,255,0)');
+    bounce.addColorStop(1, rimSpec.bounce);
+    ctx.fillStyle = bounce;
+    ctx.fillRect(-1.1 * u, cy + 0.55 * u, 2.2 * u, 0.45 * u);
+
+    ctx.strokeStyle = rimSpec.rim;
+    ctx.lineWidth = 0.06 * u;
     ctx.beginPath();
-    ctx.ellipse(0, cy, 0.86 * u, 0.83 * u, 0, Math.PI * 1.08, Math.PI * 1.42);
+    ctx.ellipse(0, cy, 0.87 * u, 0.84 * u, 0, Math.PI * 1.06, Math.PI * 1.46);
     ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.strokeStyle = rimSpec.rim;
+    ctx.globalAlpha = 0.45;
+    ctx.lineWidth = 0.038 * u;
     ctx.beginPath();
-    ctx.ellipse(-0.52 * u, cy - 0.58 * u, 0.12 * u, 0.06 * u, -0.6, 0, Math.PI * 2);
+    ctx.ellipse(0, cy, 0.88 * u, 0.85 * u, 0, Math.PI * 1.72, Math.PI * 1.98);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = 'rgba(255,255,255,0.58)';
+    ctx.beginPath();
+    ctx.ellipse(-0.52 * u, cy - 0.58 * u, 0.13 * u, 0.065 * u, -0.6, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
 
@@ -722,6 +803,19 @@ export class MonsterCanvasController {
     this.drawEye(eyeX, eyeY, er, 1);
     this.drawBrow(-eyeX, eyeY, u, -1);
     this.drawBrow(eyeX, eyeY, u, 1);
+    // Magnetic hunger glow halo when dragging a card near Munchy's mouth
+    if (this.hunger > 0.12 && this.mood !== 'chewing') {
+      const pulse = 0.85 + 0.15 * Math.sin(this.time * 12);
+      const hr = (0.42 + this.hunger * 0.25) * u * pulse;
+      const hg = ctx.createRadialGradient(0, mouthY + 0.12 * u, 0.05 * u, 0, mouthY + 0.12 * u, hr);
+      hg.addColorStop(0, `rgba(255, 232, 110, ${this.hunger * 0.5})`);
+      hg.addColorStop(1, 'rgba(255, 232, 110, 0)');
+      ctx.fillStyle = hg;
+      ctx.beginPath();
+      ctx.arc(0, mouthY + 0.12 * u, hr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
     this.drawMouth(0, mouthY, u);
 
     if (this.mood === 'confused') {
@@ -822,11 +916,17 @@ export class MonsterCanvasController {
     ctx.fill();
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
-    ctx.arc(x + lx - r * 0.24, y + ly - r * 0.28, r * 0.2, 0, Math.PI * 2);
+    ctx.arc(x + lx - r * 0.24, y + ly - r * 0.28, r * 0.21, 0, Math.PI * 2);
     ctx.fill();
     ctx.beginPath();
-    ctx.arc(x + lx + r * 0.2, y + ly + r * 0.2, r * 0.09, 0, Math.PI * 2);
+    ctx.arc(x + lx + r * 0.21, y + ly + r * 0.2, r * 0.095, 0, Math.PI * 2);
     ctx.fill();
+    // Subtle wet sky-reflection crescent across upper iris
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.42)';
+    ctx.lineWidth = r * 0.08;
+    ctx.beginPath();
+    ctx.arc(x + lx, y + ly, ir * 0.78, Math.PI * 1.15, Math.PI * 1.72);
+    ctx.stroke();
 
     // Eyelid (blink)
     if (this.blink > 0.01) {

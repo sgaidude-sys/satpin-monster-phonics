@@ -1,4 +1,9 @@
-import { engine, midiToHz } from './engine';
+import { engine, midiToHz, panFromScreenX } from './engine';
+
+/** Subtle ±pct pitch randomization (default ±10%) to eliminate robotic repetition. */
+const jitterPitch = (pct = 0.1) => 1 + (Math.random() * 2 - 1) * pct;
+/** Subtle ±pct gain variation (default ±8%) for organic dynamics. */
+const jitterGain = (pct = 0.08) => 1 + (Math.random() * 2 - 1) * pct;
 
 /* ------------------------------------------------------------------ */
 /*  Low-level voices                                                   */
@@ -15,16 +20,29 @@ interface ToneOpts {
   gain: number;
   reverb?: number;
   pan?: number;
+  panEnd?: number;
   filter?: number;
   dest?: AudioNode;
 }
 
-function out(dest: AudioNode | undefined, node: AudioNode, pan = 0): void {
+function out(
+  dest: AudioNode | undefined,
+  node: AudioNode,
+  pan = 0,
+  panEnd?: number,
+  t = 0,
+  dur = 0.3
+): void {
   const ctx = engine.ctx!;
   const target = dest ?? engine.sfx;
-  if (pan !== 0 && ctx.createStereoPanner) {
+  if ((pan !== 0 || (panEnd !== undefined && panEnd !== pan)) && ctx.createStereoPanner) {
     const p = ctx.createStereoPanner();
-    p.pan.value = pan;
+    const start = t || ctx.currentTime;
+    const clampedStart = Math.max(-1, Math.min(1, pan));
+    p.pan.setValueAtTime(clampedStart, start);
+    if (panEnd !== undefined && panEnd !== pan) {
+      p.pan.linearRampToValueAtTime(Math.max(-1, Math.min(1, panEnd)), start + Math.max(0.05, dur));
+    }
     node.connect(p).connect(target);
   } else {
     node.connect(target);
@@ -51,7 +69,7 @@ function tone(o: ToneOpts): void {
     f.frequency.value = o.filter;
     node = node.connect(f);
   }
-  out(o.dest, node, o.pan);
+  out(o.dest, node, o.pan, o.panEnd, t, o.dur);
   if (o.reverb) engine.send(node, o.reverb);
   osc.start(t);
   osc.stop(t + o.dur + 0.05);
@@ -68,6 +86,7 @@ interface NoiseOpts {
   attack?: number;
   reverb?: number;
   pan?: number;
+  panEnd?: number;
   dest?: AudioNode;
 }
 
@@ -89,7 +108,7 @@ function noise(o: NoiseOpts): void {
   g.gain.linearRampToValueAtTime(o.gain, t + a);
   g.gain.exponentialRampToValueAtTime(0.0001, t + o.dur);
   const node = src.connect(f).connect(g);
-  out(o.dest, node, o.pan);
+  out(o.dest, node, o.pan, o.panEnd, t, o.dur);
   if (o.reverb) engine.send(node, o.reverb);
   src.start(t, Math.random() * 1.5);
   src.stop(t + o.dur + 0.05);
@@ -138,38 +157,49 @@ function ready(): AudioContext | null {
   return ctx;
 }
 
-/** Soft bubbly UI tap. */
-export function sfxTap(pitch = 1): void {
+/** Soft bubbly UI tap with subtle pitch & volume randomization. */
+export function sfxTap(pitch = 1, screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  tone({ freq: 420 * pitch, freqEnd: 880 * pitch, glide: 0.06, t, dur: 0.11, gain: 0.22, attack: 0.003 });
-  noise({ t, dur: 0.03, gain: 0.05, freq: 3000 * pitch, q: 2 });
+  const p = pitch * jitterPitch(0.09);
+  const g = jitterGain(0.08);
+  const pan = panFromScreenX(screenX);
+  tone({ freq: 420 * p, freqEnd: 880 * p, glide: 0.06, t, dur: 0.11, gain: 0.22 * g, attack: 0.003, pan });
+  noise({ t, dur: 0.03, gain: 0.05 * g, freq: 3000 * p, q: 2, pan });
 }
 
-/** Little pitched pluck when hovering a card. */
-export function sfxHover(index: number): void {
+/** Little pitched pluck when hovering a card (spatialized & subtly micro-detuned). */
+export function sfxHover(index: number, screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
-  marimba(midiToHz(PENTA[2 + index * 2]), ctx.currentTime, 0.12, 0.35, 0.15, (index - 1) * 0.4);
+  const freq = midiToHz(PENTA[2 + index * 2]) * jitterPitch(0.03);
+  const pan = screenX !== undefined ? panFromScreenX(screenX) : (index - 1) * 0.35 + 0.18;
+  marimba(freq, ctx.currentTime, 0.12 * jitterGain(0.08), 0.35, 0.16, pan);
 }
 
 /** Card is lifted with a finger. */
-export function sfxPickup(index = 1): void {
+export function sfxPickup(index = 1, screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  tone({ freq: 300, freqEnd: 760, glide: 0.09, t, dur: 0.14, gain: 0.2, pan: (index - 1) * 0.4 });
-  tone({ freq: 900, freqEnd: 1500, glide: 0.07, t: t + 0.04, dur: 0.1, gain: 0.07 });
+  const p = jitterPitch(0.09);
+  const g = jitterGain(0.08);
+  const pan = screenX !== undefined ? panFromScreenX(screenX) : (index - 1) * 0.35 + 0.15;
+  tone({ freq: 300 * p, freqEnd: 760 * p, glide: 0.09, t, dur: 0.14, gain: 0.2 * g, pan });
+  tone({ freq: 900 * p, freqEnd: 1500 * p, glide: 0.07, t: t + 0.04, dur: 0.1, gain: 0.07 * g, pan });
 }
 
 /** Card dropped back to its slot. */
-export function sfxDrop(): void {
+export function sfxDrop(screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  tone({ freq: 520, freqEnd: 260, glide: 0.08, t, dur: 0.12, gain: 0.16 });
-  noise({ t, dur: 0.05, gain: 0.05, freq: 1200, q: 1.4 });
+  const p = jitterPitch(0.1);
+  const g = jitterGain(0.08);
+  const pan = panFromScreenX(screenX);
+  tone({ freq: 520 * p, freqEnd: 260 * p, glide: 0.08, t, dur: 0.12, gain: 0.16 * g, pan });
+  noise({ t, dur: 0.05, gain: 0.05 * g, freq: 1200 * p, q: 1.4, pan });
 }
 
 /** Card dealt onto the table. */
@@ -177,32 +207,52 @@ export function sfxDeal(index: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  noise({ t, dur: 0.09, gain: 0.12, freq: 2400, freqEnd: 900, q: 1.2, pan: (index - 1) * 0.5 });
-  marimba(midiToHz([67, 72, 76][index % 3]), t + 0.02, 0.09, 0.3, 0.15, (index - 1) * 0.5);
+  const p = jitterPitch(0.08);
+  const pan = (index - 1) * 0.42 + 0.15;
+  noise({ t, dur: 0.09, gain: 0.12 * jitterGain(0.08), freq: 2400 * p, freqEnd: 900 * p, q: 1.2, pan });
+  marimba(midiToHz([67, 72, 76][index % 3]) * jitterPitch(0.025), t + 0.02, 0.09, 0.3, 0.15, pan);
 }
 
-/** Airy whoosh for flying cards. */
-export function sfxWhoosh(dur = 0.4): void {
+/** Airy stereo-panning whoosh for flying cards & transitions. */
+export function sfxWhoosh(dur = 0.4, fromX?: number, toX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  noise({ t, dur, gain: 0.22, freq: 500, freqEnd: 2800, q: 1.8, attack: dur * 0.6, reverb: 0.15 });
+  const p = jitterPitch(0.1);
+  const pan = fromX !== undefined ? panFromScreenX(fromX) : 0.35;
+  const panEnd = toX !== undefined ? panFromScreenX(toX) : -0.35;
+  noise({
+    t,
+    dur,
+    gain: 0.22 * jitterGain(0.08),
+    freq: 500 * p,
+    freqEnd: 2800 * p,
+    q: 1.8,
+    attack: dur * 0.6,
+    reverb: 0.16,
+    pan,
+    panEnd,
+  });
 }
 
-/** Three crunchy chomps and a satisfying gulp. */
-export function sfxMunch(): number {
+/** Three crunchy spatialized chomps and a satisfying gulp (randomized per bite). */
+export function sfxMunch(screenX?: number): number {
   const ctx = ready();
   if (!ctx) return 0;
   const t = ctx.currentTime;
+  const pan = screenX !== undefined ? panFromScreenX(screenX) : -0.35;
   for (let i = 0; i < 3; i++) {
     const s = t + i * 0.17;
-    tone({ freq: 170 - i * 12, freqEnd: 60, glide: 0.07, t: s, dur: 0.1, gain: 0.45, attack: 0.002 });
-    noise({ t: s, dur: 0.09, gain: 0.32, freq: 1300 + Math.random() * 700, q: 0.9, attack: 0.002 });
-    noise({ t: s + 0.012, dur: 0.05, gain: 0.12, type: 'highpass', freq: 4500, q: 0.7 });
+    const p = jitterPitch(0.11);
+    const g = jitterGain(0.08);
+    tone({ freq: (170 - i * 12) * p, freqEnd: 60 * p, glide: 0.07, t: s, dur: 0.1, gain: 0.45 * g, attack: 0.002, pan });
+    noise({ t: s, dur: 0.09, gain: 0.32 * g, freq: 1300 + Math.random() * 750, q: 0.9, attack: 0.002, pan });
+    noise({ t: s + 0.012, dur: 0.05, gain: 0.12 * g, type: 'highpass', freq: 4500 * p, q: 0.7, pan });
   }
+  const gp = jitterPitch(0.08);
   const g = t + 0.56;
-  tone({ freq: 340, freqEnd: 110, glide: 0.16, t: g, dur: 0.22, gain: 0.3, attack: 0.01, filter: 1200 });
-  tone({ freq: 680, freqEnd: 220, glide: 0.14, t: g, dur: 0.12, gain: 0.08 });
+  tone({ freq: 340 * gp, freqEnd: 110 * gp, glide: 0.16, t: g, dur: 0.22, gain: 0.3, attack: 0.01, filter: 1200, pan });
+  tone({ freq: 680 * gp, freqEnd: 220 * gp, glide: 0.14, t: g, dur: 0.12, gain: 0.08, pan });
   return 0.78;
 }
 
@@ -231,46 +281,53 @@ export function sfxSparkle(at?: number, amount = 1): void {
 }
 
 /** Friendly cartoon "bwoing" + raspberry for a wrong answer — silly, never scary. */
-export function sfxWrong(): void {
+export function sfxWrong(screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
+  const p = jitterPitch(0.1);
+  const gScale = jitterGain(0.08);
+  const pan = screenX !== undefined ? panFromScreenX(screenX) : -0.3;
   // Spring boing (vibrato sine)
   const osc = ctx.createOscillator();
   const lfo = ctx.createOscillator();
   const lfoG = ctx.createGain();
   const g = ctx.createGain();
   osc.type = 'sine';
-  osc.frequency.setValueAtTime(190, t);
-  osc.frequency.exponentialRampToValueAtTime(420, t + 0.12);
-  osc.frequency.exponentialRampToValueAtTime(240, t + 0.55);
+  osc.frequency.setValueAtTime(190 * p, t);
+  osc.frequency.exponentialRampToValueAtTime(420 * p, t + 0.12);
+  osc.frequency.exponentialRampToValueAtTime(240 * p, t + 0.55);
   lfo.frequency.setValueAtTime(16, t);
   lfo.frequency.linearRampToValueAtTime(7, t + 0.55);
   lfoG.gain.setValueAtTime(40, t);
   lfoG.gain.exponentialRampToValueAtTime(8, t + 0.55);
   lfo.connect(lfoG).connect(osc.frequency);
   g.gain.setValueAtTime(0.0001, t);
-  g.gain.linearRampToValueAtTime(0.26, t + 0.02);
+  g.gain.linearRampToValueAtTime(0.26 * gScale, t + 0.02);
   g.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
   const node = osc.connect(g);
-  node.connect(engine.sfx);
+  out(engine.sfx, node, pan, pan * 0.5, t, 0.6);
   engine.send(node, 0.15);
   osc.start(t);
   lfo.start(t);
   osc.stop(t + 0.65);
   lfo.stop(t + 0.65);
   // Two soft descending "uh-oh" plucks
-  marimba(midiToHz(67), t + 0.05, 0.14, 0.35, 0.1);
-  marimba(midiToHz(64), t + 0.2, 0.14, 0.45, 0.1);
+  marimba(midiToHz(67) * jitterPitch(0.04), t + 0.05, 0.14 * gScale, 0.35, 0.1, pan);
+  marimba(midiToHz(64) * jitterPitch(0.04), t + 0.2, 0.14 * gScale, 0.45, 0.1, pan);
 }
 
-/** "Ptooey!" spit-out. */
-export function sfxSpit(): void {
+/** "Ptooey!" spatialized spit-out sweeping from Munchy toward the card slot. */
+export function sfxSpit(fromX?: number, toX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  noise({ t, dur: 0.16, gain: 0.3, freq: 900, freqEnd: 2400, q: 2.2, attack: 0.01 });
-  tone({ freq: 520, freqEnd: 180, glide: 0.18, t: t + 0.02, dur: 0.22, gain: 0.18, type: 'triangle', filter: 2000 });
+  const p = jitterPitch(0.11);
+  const g = jitterGain(0.08);
+  const pan = fromX !== undefined ? panFromScreenX(fromX) : -0.35;
+  const panEnd = toX !== undefined ? panFromScreenX(toX) : 0.35;
+  noise({ t, dur: 0.16, gain: 0.3 * g, freq: 900 * p, freqEnd: 2400 * p, q: 2.2, attack: 0.01, pan, panEnd });
+  tone({ freq: 520 * p, freqEnd: 180 * p, glide: 0.18, t: t + 0.02, dur: 0.22, gain: 0.18 * g, type: 'triangle', filter: 2000, pan, panEnd });
 }
 
 /** Star lands in the progress meter. */
@@ -284,25 +341,29 @@ export function sfxStar(slot: number): void {
   noise({ t, dur: 0.5, gain: 0.04, type: 'highpass', freq: 7000, q: 0.5, reverb: 0.3 });
 }
 
-/** Rising swoosh as a star flies to the meter. */
-export function sfxStarFly(): void {
+/** Rising swoosh as a star flies to the meter (pans dynamically across stereo field). */
+export function sfxStarFly(fromX?: number, toX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  tone({ freq: 600, freqEnd: 1800, glide: 0.45, t, dur: 0.5, gain: 0.05, type: 'triangle', reverb: 0.3 });
-  noise({ t, dur: 0.45, gain: 0.08, freq: 3000, freqEnd: 8000, q: 3, attack: 0.3, reverb: 0.2 });
+  const p = jitterPitch(0.06);
+  const pan = panFromScreenX(fromX);
+  const panEnd = panFromScreenX(toX);
+  tone({ freq: 600 * p, freqEnd: 1800 * p, glide: 0.45, t, dur: 0.5, gain: 0.05, type: 'triangle', reverb: 0.3, pan, panEnd });
+  noise({ t, dur: 0.45, gain: 0.08, freq: 3000 * p, freqEnd: 8000 * p, q: 3, attack: 0.3, reverb: 0.2, pan, panEnd });
 }
 
-/** Munchy giggles when poked. */
-export function sfxGiggle(): void {
+/** Munchy giggles when poked (pitch & volume randomized). */
+export function sfxGiggle(screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  const base = 520 + Math.random() * 120;
+  const base = (520 + Math.random() * 140) * jitterPitch(0.08);
+  const pan = screenX !== undefined ? panFromScreenX(screenX) : -0.3;
   for (let i = 0; i < 4; i++) {
-    const s = t + i * 0.09;
+    const s = t + i * (0.085 + Math.random() * 0.012);
     const f = base * (1 - i * 0.06);
-    tone({ freq: f * 1.25, freqEnd: f, glide: 0.06, t: s, dur: 0.08, gain: 0.14, type: 'triangle', filter: 2600 });
+    tone({ freq: f * 1.25, freqEnd: f, glide: 0.06, t: s, dur: 0.08, gain: 0.14 * jitterGain(0.08), type: 'triangle', filter: 2600, pan });
   }
 }
 
@@ -458,34 +519,41 @@ export function sfxBurp(): void {
   noise({ t, dur: dur * 0.9, gain: 0.08, freq: 500, q: 1.5, attack: 0.03 });
 }
 
-/** Bubble pop — pitch climbs with each pop. */
-export function sfxBubblePop(pitch = 1): void {
+/** Bubble pop — pitch climbs with each pop + subtle organic variation & stereo pan. */
+export function sfxBubblePop(pitch = 1, screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  tone({ freq: 500 * pitch, freqEnd: 1500 * pitch, glide: 0.04, t, dur: 0.08, gain: 0.3, attack: 0.001 });
-  noise({ t, dur: 0.03, gain: 0.12, type: 'highpass', freq: 3000, q: 0.7 });
-  bell(midiToHz(84 + Math.round((pitch - 1) * 12)), t + 0.03, 0.06, 0.5, 0.35);
+  const p = pitch * jitterPitch(0.08);
+  const g = jitterGain(0.08);
+  const pan = panFromScreenX(screenX);
+  tone({ freq: 500 * p, freqEnd: 1500 * p, glide: 0.04, t, dur: 0.08, gain: 0.3 * g, attack: 0.001, pan });
+  noise({ t, dur: 0.03, gain: 0.12 * g, type: 'highpass', freq: 3000 * p, q: 0.7, pan });
+  bell(midiToHz(84 + Math.round((pitch - 1) * 12)), t + 0.03, 0.06 * g, 0.5, 0.35, pan);
 }
 
-/** Rubbery "boop" when tapping a wrong bubble. */
-export function sfxBonk(): void {
+/** Rubbery "boop" when tapping a wrong bubble or egg (randomized ±10%). */
+export function sfxBonk(screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  tone({ freq: 340, freqEnd: 190, glide: 0.18, t, dur: 0.22, gain: 0.22, type: 'triangle', filter: 1400 });
+  const p = jitterPitch(0.11);
+  const pan = panFromScreenX(screenX);
+  tone({ freq: 340 * p, freqEnd: 190 * p, glide: 0.18, t, dur: 0.22, gain: 0.22 * jitterGain(0.08), type: 'triangle', filter: 1400, pan });
 }
 
-/** Eggshell crack — bigger with each stage. */
-export function sfxCrack(stage: number): void {
+/** Eggshell crack — bigger with each stage & spatialized. */
+export function sfxCrack(stage: number, screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
+  const p = jitterPitch(0.09);
+  const pan = panFromScreenX(screenX);
   const n = 2 + stage;
   for (let i = 0; i < n; i++) {
-    noise({ t: t + i * 0.025, dur: 0.035, gain: 0.25 + stage * 0.05, freq: 3200 + Math.random() * 2000, q: 2.5, attack: 0.001 });
+    noise({ t: t + i * 0.025, dur: 0.035, gain: (0.25 + stage * 0.05) * jitterGain(0.08), freq: (3200 + Math.random() * 2000) * p, q: 2.5, attack: 0.001, pan });
   }
-  tone({ freq: 260 + stage * 40, freqEnd: 120, glide: 0.06, t, dur: 0.08, gain: 0.25 });
+  tone({ freq: (260 + stage * 40) * p, freqEnd: 120 * p, glide: 0.06, t, dur: 0.08, gain: 0.25, pan });
 }
 
 /** Hatching: pop + happy rising arpeggio. */
@@ -533,13 +601,27 @@ export function sfxStarAward(i: number): void {
   tone({ freq: 90, freqEnd: 50, t, dur: 0.25, gain: 0.3 });
 }
 
-/** Little hop on the map. */
-export function sfxHop(i = 0): void {
+/** Little hop on the map (with subtle pitch variation). */
+export function sfxHop(i = 0, screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  tone({ freq: 300 + i * 40, freqEnd: 700 + i * 60, glide: 0.1, t, dur: 0.14, gain: 0.16 });
-  tone({ freq: 160, freqEnd: 70, t: t + 0.22, dur: 0.07, gain: 0.2 });
+  const p = jitterPitch(0.09);
+  const pan = panFromScreenX(screenX);
+  tone({ freq: (300 + i * 40) * p, freqEnd: (700 + i * 60) * p, glide: 0.1, t, dur: 0.14, gain: 0.16 * jitterGain(0.08), pan });
+  tone({ freq: 160 * p, freqEnd: 70 * p, t: t + 0.22, dur: 0.07, gain: 0.2 * jitterGain(0.08), pan });
+}
+
+/** Soft cushioned thump when Munchy lands from a jump. */
+export function sfxLand(impact = 0.6, screenX?: number): void {
+  const ctx = ready();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const p = jitterPitch(0.11);
+  const g = Math.min(1, Math.max(0.2, impact)) * jitterGain(0.08);
+  const pan = screenX !== undefined ? panFromScreenX(screenX) : -0.35;
+  tone({ freq: 125 * p, freqEnd: 52 * p, glide: 0.065, t, dur: 0.09, gain: 0.16 * g, attack: 0.002, pan });
+  noise({ t, dur: 0.045, gain: 0.045 * g, type: 'lowpass', freq: 650 * p, q: 0.8, pan });
 }
 
 /** A new level node unlocks on the map. */
@@ -570,20 +652,24 @@ export function sfxSpin(): void {
   tone({ freq: 400, freqEnd: 1200, glide: 0.45, t, dur: 0.5, gain: 0.08, type: 'triangle' });
 }
 
-/** Rubber squish when Munchy is squeezed. */
-export function sfxSquish(): void {
+/** Rubber squish when Munchy is squeezed (randomized ±10%). */
+export function sfxSquish(screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  tone({ freq: 180, freqEnd: 520, glide: 0.18, t, dur: 0.25, gain: 0.22, type: 'triangle', filter: 1600 });
-  noise({ t, dur: 0.15, gain: 0.08, freq: 900, q: 3 });
+  const p = jitterPitch(0.1);
+  const pan = screenX !== undefined ? panFromScreenX(screenX) : -0.3;
+  tone({ freq: 180 * p, freqEnd: 520 * p, glide: 0.18, t, dur: 0.25, gain: 0.22 * jitterGain(0.08), type: 'triangle', filter: 1600, pan });
+  noise({ t, dur: 0.15, gain: 0.08, freq: 900 * p, q: 3, pan });
 }
 
-/** Tiny chomp when a bubble letter reaches Munchy. */
-export function sfxNom(): void {
+/** Tiny chomp when a bubble letter reaches Munchy (randomized ±10%). */
+export function sfxNom(screenX?: number): void {
   const ctx = ready();
   if (!ctx) return;
   const t = ctx.currentTime;
-  tone({ freq: 170, freqEnd: 70, glide: 0.06, t, dur: 0.09, gain: 0.35 });
-  noise({ t, dur: 0.07, gain: 0.2, freq: 1500, q: 1 });
+  const p = jitterPitch(0.11);
+  const pan = screenX !== undefined ? panFromScreenX(screenX) : -0.35;
+  tone({ freq: 170 * p, freqEnd: 70 * p, glide: 0.06, t, dur: 0.09, gain: 0.35 * jitterGain(0.08), pan });
+  noise({ t, dur: 0.07, gain: 0.2 * jitterGain(0.08), freq: 1500 * p, q: 1, pan });
 }

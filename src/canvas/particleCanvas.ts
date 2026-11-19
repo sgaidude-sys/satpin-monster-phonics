@@ -1,6 +1,19 @@
-type Shape = 'dot' | 'star' | 'spark' | 'confetti' | 'ring' | 'crumb' | 'heart' | 'text' | 'orb';
+type Shape =
+  | 'dot'
+  | 'star'
+  | 'spark'
+  | 'streak'
+  | 'flash'
+  | 'puff'
+  | 'confetti'
+  | 'ring'
+  | 'crumb'
+  | 'heart'
+  | 'text'
+  | 'orb';
 
 interface Particle {
+  active: boolean;
   shape: Shape;
   x: number;
   y: number;
@@ -15,8 +28,8 @@ interface Particle {
   rot: number;
   vRot: number;
   phase: number;
-  text?: string;
-  additive?: boolean;
+  text: string;
+  additive: boolean;
 }
 
 interface Flyer {
@@ -34,13 +47,21 @@ interface Flyer {
   text?: string;
 }
 
+const POOL_CAPACITY = 640;
 const CONFETTI = ['#ff5d8f', '#ffb020', '#2ed47a', '#29b6f6', '#9b6dff', '#ff7ac6', '#ffe14d'];
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
 
+/**
+ * Zero-allocation pooled 2D foreground VFX layer.
+ * Handles layered impact flashes, directional spark streaks, ground dust puffs,
+ * cartoon spit-out puffs, shockwave rings, flying stars/letters, and confetti.
+ */
 export class ParticleCanvasController {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
-  private particles: Particle[] = [];
+  private pool: Particle[] = [];
+  private cursor = 0;
+  private activeCount = 0;
   private flyers: Flyer[] = [];
   private last = 0;
   private confettiUntil = 0;
@@ -53,6 +74,27 @@ export class ParticleCanvasController {
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
+    for (let i = 0; i < POOL_CAPACITY; i++) {
+      this.pool.push({
+        active: false,
+        shape: 'dot',
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        size: 8,
+        color: '#ffffff',
+        life: 0,
+        maxLife: 1,
+        gravity: 0,
+        drag: 0.96,
+        rot: 0,
+        vRot: 0,
+        phase: 0,
+        text: '',
+        additive: false,
+      });
+    }
     this.resize();
     window.addEventListener('resize', () => this.resize());
     this.last = performance.now();
@@ -67,41 +109,84 @@ export class ParticleCanvasController {
     this.canvas.height = Math.floor(this.h * this.dpr);
   }
 
-  private add(p: Partial<Particle> & Pick<Particle, 'shape' | 'x' | 'y'>): void {
-    this.particles.push({
-      vx: 0,
-      vy: 0,
-      size: 8,
-      color: '#fff',
-      life: 0,
-      maxLife: 1,
-      gravity: 0,
-      drag: 0.96,
-      rot: Math.random() * Math.PI * 2,
-      vRot: 0,
-      phase: Math.random() * Math.PI * 2,
-      ...p,
-    });
+  private spawn(p: Partial<Particle> & Pick<Particle, 'shape' | 'x' | 'y'>): void {
+    // Find an inactive slot or overwrite oldest via ring cursor
+    let slot: Particle | null = null;
+    for (let i = 0; i < POOL_CAPACITY; i++) {
+      const idx = (this.cursor + i) % POOL_CAPACITY;
+      if (!this.pool[idx].active) {
+        slot = this.pool[idx];
+        this.cursor = (idx + 1) % POOL_CAPACITY;
+        break;
+      }
+    }
+    if (!slot) {
+      slot = this.pool[this.cursor];
+      this.cursor = (this.cursor + 1) % POOL_CAPACITY;
+    } else {
+      this.activeCount++;
+    }
+
+    slot.active = true;
+    slot.shape = p.shape;
+    slot.x = p.x;
+    slot.y = p.y;
+    slot.vx = p.vx ?? 0;
+    slot.vy = p.vy ?? 0;
+    slot.size = p.size ?? 8;
+    slot.color = p.color ?? '#ffffff';
+    slot.life = 0;
+    slot.maxLife = p.maxLife ?? 1;
+    slot.gravity = p.gravity ?? 0;
+    slot.drag = p.drag ?? 0.96;
+    slot.rot = p.rot ?? Math.random() * Math.PI * 2;
+    slot.vRot = p.vRot ?? 0;
+    slot.phase = p.phase ?? Math.random() * Math.PI * 2;
+    slot.text = p.text ?? '';
+    slot.additive = p.additive ?? false;
   }
 
-  /** Juicy celebratory burst: shockwave ring, stars, sparkles and dots. */
+  /** Layered AAA impact burst: additive cast flash, dual shockwaves, directional streaks, stars & sparkles. */
   burst(x: number, y: number, accent = '#ffd43b', count = 30): void {
     const colors = [accent, '#ffe14d', '#ffffff', '#7dd3fc', '#ff9cc8'];
-    this.add({ shape: 'ring', x, y, size: 10, color: '#ffffff', maxLife: 0.45 });
-    this.add({ shape: 'ring', x, y, size: 6, color: accent, maxLife: 0.6 });
+    this.spawn({ shape: 'flash', x, y, size: 78, color: '#ffffff', maxLife: 0.22, additive: true });
+    this.spawn({ shape: 'flash', x, y, size: 110, color: accent, maxLife: 0.32, additive: true });
+    this.spawn({ shape: 'ring', x, y, size: 12, color: '#ffffff', maxLife: 0.42 });
+    this.spawn({ shape: 'ring', x, y, size: 6, color: accent, maxLife: 0.6 });
+
+    // Directional high-speed impact spark streaks
+    const streaks = Math.min(12, Math.max(6, Math.round(count * 0.35)));
+    for (let i = 0; i < streaks; i++) {
+      const a = (i / streaks) * Math.PI * 2 + rand(-0.22, 0.22);
+      const sp = rand(460, 820);
+      this.spawn({
+        shape: 'streak',
+        x,
+        y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp,
+        size: rand(14, 24),
+        color: i % 2 === 0 ? '#ffffff' : accent,
+        maxLife: rand(0.24, 0.4),
+        gravity: 340,
+        drag: 0.89,
+        additive: true,
+      });
+    }
+
     for (let i = 0; i < count; i++) {
       const a = (i / count) * Math.PI * 2 + rand(-0.2, 0.2);
-      const sp = rand(220, 560);
+      const sp = rand(210, 560);
       const shape: Shape = i % 3 === 0 ? 'star' : i % 3 === 1 ? 'spark' : 'dot';
-      this.add({
+      this.spawn({
         shape,
         x,
         y,
         vx: Math.cos(a) * sp,
         vy: Math.sin(a) * sp - 120,
-        size: shape === 'dot' ? rand(4, 8) : rand(9, 16),
+        size: shape === 'dot' ? rand(4, 8) : rand(10, 17),
         color: colors[i % colors.length],
-        maxLife: rand(0.6, 1.1),
+        maxLife: rand(0.6, 1.15),
         gravity: 700,
         drag: 0.93,
         vRot: rand(-8, 8),
@@ -110,10 +195,83 @@ export class ParticleCanvasController {
     }
   }
 
+  /** Soft glowing magic halo for tile lighting, egg cracks & UI feedback. */
+  magicRing(x: number, y: number, color = '#ffd43b'): void {
+    this.spawn({ shape: 'flash', x, y, size: 54, color, maxLife: 0.25, additive: true });
+    this.spawn({ shape: 'ring', x, y, size: 8, color, maxLife: 0.45 });
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 + rand(-0.2, 0.2);
+      this.spawn({
+        shape: 'spark',
+        x,
+        y,
+        vx: Math.cos(a) * rand(90, 180),
+        vy: Math.sin(a) * rand(90, 180),
+        size: rand(8, 13),
+        color: i % 2 === 0 ? '#ffffff' : color,
+        maxLife: rand(0.32, 0.5),
+        drag: 0.92,
+        additive: true,
+      });
+    }
+  }
+
+  /** Soft cushioned landing dust puffs when Munchy lands from a hop or cards drop. */
+  dustPuff(x: number, y: number, intensity = 0.7): void {
+    const count = Math.round(4 + intensity * 6);
+    for (let i = 0; i < count; i++) {
+      const side = i % 2 === 0 ? 1 : -1;
+      this.spawn({
+        shape: 'puff',
+        x: x + side * rand(8, 38) * intensity,
+        y: y + rand(-4, 4),
+        vx: side * rand(45, 135) * intensity,
+        vy: rand(-50, -15) * intensity,
+        size: rand(10, 22) * (0.7 + intensity * 0.5),
+        color: 'rgba(255, 255, 245, 0.85)',
+        maxLife: rand(0.4, 0.68),
+        gravity: -18,
+        drag: 0.91,
+      });
+    }
+  }
+
+  /** Playful comic puff of silly pastel clouds & bubbles when Munchy spits out a wrong card. */
+  spitPuff(x: number, y: number, dirX = 1): void {
+    const dir = dirX >= 0 ? 1 : -1;
+    for (let i = 0; i < 8; i++) {
+      this.spawn({
+        shape: 'puff',
+        x: x + rand(-8, 10),
+        y: y + rand(-8, 8),
+        vx: dir * rand(120, 320),
+        vy: rand(-140, 40),
+        size: rand(14, 28),
+        color: i % 2 === 0 ? '#dff6ff' : '#ffffff',
+        maxLife: rand(0.45, 0.75),
+        gravity: -40,
+        drag: 0.92,
+      });
+    }
+    for (let i = 0; i < 5; i++) {
+      this.spawn({
+        shape: 'ring',
+        x: x + dir * rand(10, 35),
+        y: y + rand(-15, 15),
+        vx: dir * rand(90, 210),
+        vy: rand(-90, -20),
+        size: rand(4, 9),
+        color: '#9ee7ff',
+        maxLife: rand(0.35, 0.55),
+        drag: 0.94,
+      });
+    }
+  }
+
   /** Food crumbs flying out of Munchy's mouth while chewing. */
   crumbs(x: number, y: number, color: string, count = 10): void {
     for (let i = 0; i < count; i++) {
-      this.add({
+      this.spawn({
         shape: 'crumb',
         x: x + rand(-14, 14),
         y: y + rand(-6, 6),
@@ -131,7 +289,7 @@ export class ParticleCanvasController {
 
   hearts(x: number, y: number, count = 5): void {
     for (let i = 0; i < count; i++) {
-      this.add({
+      this.spawn({
         shape: 'heart',
         x: x + rand(-40, 40),
         y: y + rand(-10, 10),
@@ -148,15 +306,15 @@ export class ParticleCanvasController {
 
   /** A tiny sparkle trail behind a dragged card. */
   trail(x: number, y: number, color: string): void {
-    this.add({
-      shape: Math.random() < 0.5 ? 'spark' : 'dot',
+    this.spawn({
+      shape: Math.random() < 0.55 ? 'spark' : 'dot',
       x: x + rand(-20, 20),
       y: y + rand(-20, 20),
       vx: rand(-40, 40),
       vy: rand(-60, 10),
-      size: rand(5, 10),
+      size: rand(6, 12),
       color: Math.random() < 0.5 ? color : '#ffffff',
-      maxLife: rand(0.35, 0.6),
+      maxLife: rand(0.35, 0.62),
       gravity: 80,
       additive: true,
     });
@@ -164,7 +322,7 @@ export class ParticleCanvasController {
 
   /** Bubbly floating words like "Yum!". */
   text(x: number, y: number, text: string, color: string, size = 44): void {
-    this.add({
+    this.spawn({
       shape: 'text',
       x,
       y,
@@ -195,12 +353,12 @@ export class ParticleCanvasController {
   confetti(ms = 5000): void {
     this.confettiUntil = performance.now() + ms;
     const { w, h } = this;
-    for (let i = 0; i < 90; i++) {
+    for (let i = 0; i < 95; i++) {
       const left = i % 2 === 0;
       const a = (left ? -Math.PI * 0.32 : -Math.PI * 0.68) + rand(-0.35, 0.35);
-      const sp = rand(700, 1300);
-      this.add({
-        shape: i % 6 === 0 ? 'star' : 'confetti',
+      const sp = rand(700, 1320);
+      this.spawn({
+        shape: i % 5 === 0 ? 'star' : 'confetti',
         x: left ? -10 : w + 10,
         y: h * rand(0.55, 0.85),
         vx: Math.cos(a) * sp,
@@ -219,17 +377,17 @@ export class ParticleCanvasController {
     const dt = Math.min(0.05, (now - this.last) / 1000);
     this.last = now;
     this.update(now, dt);
-    if (this.particles.length || this.flyers.length || this.dirty) this.render();
+    if (this.activeCount > 0 || this.flyers.length > 0 || this.dirty) this.render();
     requestAnimationFrame(this.loop);
   };
 
   private update(now: number, dt: number): void {
     if (now < this.confettiUntil) {
-      this.confettiAcc += dt * 70;
+      this.confettiAcc += dt * 74;
       while (this.confettiAcc >= 1) {
         this.confettiAcc -= 1;
-        this.add({
-          shape: Math.random() < 0.15 ? 'star' : 'confetti',
+        this.spawn({
+          shape: Math.random() < 0.16 ? 'star' : 'confetti',
           x: rand(0, this.w),
           y: -20,
           vx: rand(-60, 60),
@@ -254,37 +412,40 @@ export class ParticleCanvasController {
       f.trail += dt;
       while (f.trail > 0.012) {
         f.trail -= 0.012;
-        this.add({
+        this.spawn({
           shape: 'spark',
           x: x + rand(-6, 6),
           y: y + rand(-6, 6),
           vx: rand(-30, 30),
           vy: rand(-30, 30),
-          size: rand(6, 12),
+          size: rand(7, 13),
           color: Math.random() < 0.5 ? (f.text ? f.color : '#ffe14d') : '#ffffff',
           maxLife: rand(0.3, 0.5),
           additive: true,
         });
       }
       if (f.text) {
-        this.add({ shape: 'orb', x, y, size: 54 * (1 - e * 0.55), color: f.color, text: f.text, maxLife: 0.03, rot: 0 });
+        this.spawn({ shape: 'orb', x, y, size: 54 * (1 - e * 0.55), color: f.color, text: f.text, maxLife: 0.03, rot: 0 });
       } else {
-        this.add({ shape: 'star', x, y, size: 26, color: '#ffd43b', maxLife: 0.03, rot: f.t * 10 });
+        this.spawn({ shape: 'star', x, y, size: 26, color: '#ffd43b', maxLife: 0.03, rot: f.t * 10 });
       }
       if (f.t >= 1) {
         this.flyers.splice(i, 1);
-        this.burst(f.x1, f.y1, f.color, f.text ? 10 : 14);
+        this.burst(f.x1, f.y1, f.color, f.text ? 12 : 16);
         f.onArrive();
       }
     }
 
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
+    let alive = 0;
+    for (let i = 0; i < POOL_CAPACITY; i++) {
+      const p = this.pool[i];
+      if (!p.active) continue;
       p.life += dt;
       if (p.life >= p.maxLife || p.y > this.h + 80) {
-        this.particles.splice(i, 1);
+        p.active = false;
         continue;
       }
+      alive++;
       const drag = Math.pow(p.drag, dt * 60);
       p.vx *= drag;
       p.vy *= drag;
@@ -297,23 +458,58 @@ export class ParticleCanvasController {
       p.y += p.vy * dt;
       p.rot += p.vRot * dt;
     }
+    this.activeCount = alive;
   }
 
   private render(): void {
     const { ctx } = this;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.w, this.h);
-    this.dirty = this.particles.length > 0 || this.flyers.length > 0;
+    this.dirty = this.activeCount > 0 || this.flyers.length > 0;
 
-    for (const p of this.particles) {
+    for (let i = 0; i < POOL_CAPACITY; i++) {
+      const p = this.pool[i];
+      if (!p.active) continue;
       const lr = p.life / p.maxLife;
       let alpha = lr > 0.7 ? 1 - (lr - 0.7) / 0.3 : 1;
       ctx.save();
       ctx.translate(p.x, p.y);
-      ctx.rotate(p.rot);
+      if (p.shape !== 'streak') ctx.rotate(p.rot);
       if (p.additive) ctx.globalCompositeOperation = 'lighter';
       ctx.fillStyle = p.color;
+
       switch (p.shape) {
+        case 'flash': {
+          const r = p.size * (0.4 + lr * 0.9);
+          const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+          g.addColorStop(0, p.color);
+          g.addColorStop(0.45, p.color);
+          g.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.globalAlpha = (1 - lr) * (1 - lr) * 0.85;
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(0, 0, r, 0, Math.PI * 2);
+          ctx.fill();
+          break;
+        }
+        case 'streak': {
+          const angle = Math.atan2(p.vy, p.vx);
+          ctx.rotate(angle);
+          ctx.globalAlpha = (1 - lr) * 0.95;
+          const len = p.size * (1 - lr * 0.45);
+          ctx.beginPath();
+          ctx.ellipse(0, 0, len, Math.max(1.5, 3.2 * (1 - lr)), 0, 0, Math.PI * 2);
+          ctx.fill();
+          break;
+        }
+        case 'puff': {
+          const r = (p.size / 2) * (0.65 + lr * 0.85);
+          ctx.globalAlpha = (1 - lr) * 0.72;
+          ctx.beginPath();
+          ctx.arc(0, 0, r, 0, Math.PI * 2);
+          ctx.fill();
+          break;
+        }
         case 'dot':
           ctx.globalAlpha = alpha;
           ctx.beginPath();
@@ -355,12 +551,12 @@ export class ParticleCanvasController {
           const flip = Math.cos(p.phase * 1.3);
           ctx.scale(1, flip);
           ctx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2);
-          ctx.fillStyle = 'rgba(255,255,255,0.35)';
+          ctx.fillStyle = 'rgba(255,255,255,0.42)';
           ctx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 8);
           break;
         }
         case 'ring': {
-          const r = p.size + lr * 110;
+          const r = p.size + lr * 115;
           ctx.globalAlpha = (1 - lr) * 0.9;
           ctx.strokeStyle = p.color;
           ctx.lineWidth = 10 * (1 - lr) + 1;
@@ -394,7 +590,7 @@ export class ParticleCanvasController {
           ctx.font = `700 ${r * 1.3}px Andika, Fredoka, sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(p.text ?? '', 0, -r * 0.12);
+          ctx.fillText(p.text, 0, -r * 0.12);
           break;
         }
         case 'text': {
@@ -408,11 +604,11 @@ export class ParticleCanvasController {
           ctx.lineJoin = 'round';
           ctx.lineWidth = p.size * 0.2;
           ctx.strokeStyle = '#26213f';
-          ctx.strokeText(p.text ?? '', 0, 0);
+          ctx.strokeText(p.text, 0, 0);
           ctx.fillStyle = p.color;
-          ctx.fillText(p.text ?? '', 0, 0);
+          ctx.fillText(p.text, 0, 0);
           ctx.fillStyle = 'rgba(255,255,255,0.35)';
-          ctx.fillText(p.text ?? '', 0, -p.size * 0.06);
+          ctx.fillText(p.text, 0, -p.size * 0.06);
           break;
         }
       }

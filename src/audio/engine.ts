@@ -1,25 +1,28 @@
 /**
- * Central Web Audio graph.
+ * Central Web Audio graph (4-bus studio architecture).
  *
- *   sfx ───────┐
- *   voice ─────┼──► master ──► glue compressor ──► limiter ──► speakers
- *   music ─duck┘        ▲
+ *   sfx ──────────┐
+ *   voice ────────┼──► master ──► glue compressor ──► limiter ──► speakers
+ *   music ──duck──┤        ▲
+ *   ambience─duck─┘        │
  *   reverb send ─► convolver (procedural plate) ┘
  */
 
 export interface AudioSettings {
   music: boolean;
   sfx: boolean;
+  ambience: boolean;
   narrator: boolean;
 }
 
 const SETTINGS_KEY = 'munchy_audio_settings_v1';
 const MUSIC_LEVEL = 0.3;
 const SFX_LEVEL = 0.9;
+const AMBIENCE_LEVEL = 0.24;
 const VOICE_LEVEL = 1.0;
 
 function loadSettings(): AudioSettings {
-  const fallback: AudioSettings = { music: true, sfx: true, narrator: true };
+  const fallback: AudioSettings = { music: true, sfx: true, ambience: true, narrator: true };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return fallback;
@@ -27,6 +30,7 @@ function loadSettings(): AudioSettings {
     return {
       music: p.music ?? true,
       sfx: p.sfx ?? true,
+      ambience: p.ambience ?? true,
       narrator: p.narrator ?? true,
     };
   } catch {
@@ -41,6 +45,8 @@ class AudioEngine {
   voice!: GainNode;
   music!: GainNode;
   musicDuck!: GainNode;
+  ambience!: GainNode;
+  ambienceDuck!: GainNode;
   reverbIn!: GainNode;
   private analyser!: AnalyserNode;
   private analyserData!: Float32Array<ArrayBuffer>;
@@ -120,6 +126,10 @@ class AudioEngine {
     this.music = ctx.createGain();
     this.music.connect(this.musicDuck).connect(this.master);
 
+    this.ambienceDuck = ctx.createGain();
+    this.ambience = ctx.createGain();
+    this.ambience.connect(this.ambienceDuck).connect(this.master);
+
     this.applySettings(true);
   }
 
@@ -161,14 +171,17 @@ class AudioEngine {
     node.connect(g).connect(this.reverbIn);
   }
 
-  /** Smoothly lowers the music while speech plays. */
+  /** Smoothly lowers music & ambience while speech/phonemes play for crystal-clear voice clarity. */
   duck(on: boolean): void {
     if (!this.ctx) return;
     this.duckDepth = Math.max(0, this.duckDepth + (on ? 1 : -1));
-    const target = this.duckDepth > 0 ? 0.28 : 1;
+    const musicTarget = this.duckDepth > 0 ? 0.26 : 1;
+    const ambTarget = this.duckDepth > 0 ? 0.35 : 1;
     const t = this.ctx.currentTime;
     this.musicDuck.gain.cancelScheduledValues(t);
-    this.musicDuck.gain.setTargetAtTime(target, t, on ? 0.06 : 0.35);
+    this.musicDuck.gain.setTargetAtTime(musicTarget, t, on ? 0.06 : 0.35);
+    this.ambienceDuck.gain.cancelScheduledValues(t);
+    this.ambienceDuck.gain.setTargetAtTime(ambTarget, t, on ? 0.08 : 0.45);
   }
 
   /** 0..1 loudness of whatever Munchy is saying right now (used for lip-sync). */
@@ -208,6 +221,7 @@ class AudioEngine {
     };
     set(this.music.gain, this.settings.music ? MUSIC_LEVEL : 0);
     set(this.sfx.gain, this.settings.sfx ? SFX_LEVEL : 0);
+    set(this.ambience.gain, this.settings.ambience ? AMBIENCE_LEVEL : 0);
     set(this.voice.gain, VOICE_LEVEL);
   }
 }
@@ -220,4 +234,11 @@ export function unlockAudio(): void {
 
 export function midiToHz(m: number): number {
   return 440 * Math.pow(2, (m - 69) / 12);
+}
+
+/** Converts a viewport screen X coordinate into a comfortable stereo pan (-0.72..+0.72). */
+export function panFromScreenX(screenX?: number): number {
+  if (screenX === undefined || typeof window === 'undefined' || window.innerWidth <= 0) return 0;
+  const norm = (screenX / window.innerWidth) * 2 - 1;
+  return Math.max(-0.72, Math.min(0.72, norm * 0.72));
 }

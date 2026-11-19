@@ -4,7 +4,8 @@ import { ANIMAL_STICKERS, LETTER_GROUPS, LETTER_ITEMS, type AnimalSticker, type 
 import { HATS, LEVELS, MODE_INFO, WORLDS, type GameMode, type LevelDef } from './data/levels';
 import { engine, unlockAudio } from './audio/engine';
 import * as sfx from './audio/sfx';
-import { startMusic } from './audio/music';
+import { setMusicIntensity, setMusicWorld, startMusic } from './audio/music';
+import { setAmbienceWorld, startAmbience } from './audio/ambience';
 import { isNarratorSpeaking, playPhoneme, playSounds, preloadVoice, sayAnyWord, sayLike, sayLine, sayWord, stopVoice, type LineKey } from './audio/voice';
 import {
   completeLevel,
@@ -192,6 +193,7 @@ class PhonicsGame {
 
   // Map
   private mapIndex = 0;
+  private activeWorld = 0;
 
   private scene!: SceneCanvas;
   private monster!: MonsterCanvasController;
@@ -234,8 +236,17 @@ class PhonicsGame {
     this.render();
     this.scene = new SceneCanvas(q(this.root, '#scene'));
     this.fx = new ParticleCanvasController(q(this.root, '#fx'));
-    this.monster = new MonsterCanvasController(this.el.monsterCanvas);
-    this.titleMonster = new MonsterCanvasController(q(this.root, '#title-monster'), { idleMood: 'wave', sizeFactor: 1.05 });
+    this.monster = new MonsterCanvasController(this.el.monsterCanvas, {
+      onLand: (x, y, impact) => {
+        this.fx.dustPuff(x, y, impact);
+        if (this.screen === 'level') sfx.sfxLand(impact, x);
+      },
+    });
+    this.titleMonster = new MonsterCanvasController(q(this.root, '#title-monster'), {
+      idleMood: 'wave',
+      sizeFactor: 1.05,
+      onLand: (x, y, impact) => this.fx.dustPuff(x, y, impact * 0.7),
+    });
     this.mapMonster = new MonsterCanvasController(this.el.mapMunchy, { sizeFactor: 1.1 });
     for (const m of [this.monster, this.titleMonster, this.mapMonster]) {
       m.setVoiceProviders(() => engine.voiceLevel(), isNarratorSpeaking);
@@ -245,6 +256,7 @@ class PhonicsGame {
     this.mapMonster.pause(true);
     this.bind();
     this.renderSettings();
+    this.setActiveWorld(0);
     this.setScreen('title');
   }
 
@@ -437,6 +449,54 @@ class PhonicsGame {
     });
 
     document.addEventListener('pointerdown', () => this.bumpIdle(), { passive: true });
+
+    // Dynamically morph the 3D biome & ambient soundscape while scrolling the Adventure Map
+    let mapScrollRaf = 0;
+    el.mapScroll.addEventListener(
+      'scroll',
+      () => {
+        if (this.screen !== 'map' || mapScrollRaf) return;
+        mapScrollRaf = requestAnimationFrame(() => {
+          mapScrollRaf = 0;
+          this.syncMapScrollWorld();
+        });
+      },
+      { passive: true }
+    );
+  }
+
+  private setActiveWorld(worldIndex: number): void {
+    const w = clamp(worldIndex, 0, WORLDS.length - 1);
+    this.activeWorld = w;
+    this.el.game.dataset.world = String(w);
+    this.scene.setWorld(w);
+    setAmbienceWorld(w);
+    setMusicWorld(w);
+    for (const m of [this.monster, this.titleMonster, this.mapMonster, ...this.modalMonsters]) {
+      m.setWorld(w);
+    }
+  }
+
+  private syncMapScrollWorld(): void {
+    const { pts } = this.mapPositions();
+    const viewCenterY = this.el.mapScroll.scrollTop + this.el.mapScroll.clientHeight * 0.55;
+    let closest = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const d = Math.abs(pts[i].y - viewCenterY);
+      if (d < bestDist) {
+        bestDist = d;
+        closest = i;
+      }
+    }
+    const world = LEVELS[closest].world;
+    if (world !== this.activeWorld) this.setActiveWorld(world);
+  }
+
+  /** Coordinated AAA impact feel: 3D camera kick + bloom burst + chromatic shimmer. */
+  private juiceImpact(strength: number, x: number, y: number, accent = '#ffd43b', count3d = 22): void {
+    this.scene.triggerImpact(strength, accent);
+    if (count3d > 0) this.scene.triggerBurst(x, y, accent, count3d);
   }
 
   /** Random silly reaction when Munchy is tapped. */
@@ -507,9 +567,13 @@ class PhonicsGame {
     preloadVoice();
     sfx.sfxStart();
     startMusic();
+    startAmbience();
     this.el.title.classList.add('hide');
     setTimeout(() => this.titleMonster.pause(true), 700);
-    this.fx.burst(window.innerWidth / 2, window.innerHeight * 0.6, '#2ed47a', 30);
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight * 0.6;
+    this.fx.burst(cx, cy, '#2ed47a', 34);
+    this.juiceImpact(0.55, cx, cy, '#2ed47a', 26);
     this.showMap();
   }
 
@@ -521,6 +585,8 @@ class PhonicsGame {
     this.titleMonster.pause(false);
     this.titleMonster.setHat(this.state.equippedHat);
     this.el.title.classList.remove('hide');
+    this.setActiveWorld(0);
+    setMusicIntensity(0);
     this.setScreen('title');
   }
 
@@ -649,11 +715,13 @@ class PhonicsGame {
 
   private showMap(after?: { completed: number; unlockedNew: boolean }): void {
     this.setScreen('map');
+    setMusicIntensity(0);
     this.monster.pause(true);
     this.mapMonster.pause(false);
     this.mapMonster.setHat(this.state.equippedHat);
     const playable = Math.min(this.state.unlockedLevel, LEVELS.length - 1);
     this.mapIndex = after ? after.completed : playable;
+    this.setActiveWorld(LEVELS[this.mapIndex].world);
     this.renderMap();
     this.scrollMapTo(this.mapIndex, false);
 
@@ -766,12 +834,13 @@ class PhonicsGame {
       <h3>Settings</h3>
       ${row('music', '🎵 Music', s.music)}
       ${row('sfx', '🔔 Sound effects', s.sfx)}
+      ${row('ambience', '🌿 Nature sounds', s.ambience)}
       ${row('narrator', '🗣️ Talking', s.narrator)}
       <button type="button" class="reset-btn" id="btn-reset">Reset progress</button>
     `;
     this.el.settings.querySelectorAll<HTMLButtonElement>('.toggle-row').forEach((b) => {
       b.addEventListener('click', () => {
-        const key = b.dataset.key as 'music' | 'sfx' | 'narrator';
+        const key = b.dataset.key as 'music' | 'sfx' | 'ambience' | 'narrator';
         const next = !engine.settings[key];
         engine.setSetting(key, next);
         sfx.sfxToggle(next);
@@ -810,6 +879,8 @@ class PhonicsGame {
 
     void this.wipe(x, y, () => {
       this.setScreen('level');
+      this.setActiveWorld(this.level.world);
+      setMusicIntensity(1);
       this.mapMonster.pause(true);
       this.monster.pause(false);
       this.monster.setHat(this.state.equippedHat);
@@ -966,8 +1037,9 @@ class PhonicsGame {
         resolve();
       };
       setTimeout(() => {
-        sfx.sfxStarFly();
-        if (sr) this.fx.flyStar(x, y, sr.left + sr.width / 2, sr.top + sr.height / 2, land);
+        const tx = sr ? sr.left + sr.width / 2 : window.innerWidth / 2;
+        sfx.sfxStarFly(x, tx);
+        if (sr) this.fx.flyStar(x, y, tx, sr.top + sr.height / 2, land);
         else land();
       }, 200);
       setTimeout(land, 2200);
@@ -982,6 +1054,7 @@ class PhonicsGame {
     }
     if (this.wrongThisRound === 0) this.streak++;
     else this.streak = 0;
+    setMusicIntensity(this.streak >= 3 ? 2 : 1);
   }
 
   /** Shared wrong-answer handling. */
@@ -990,6 +1063,7 @@ class PhonicsGame {
     this.wrongThisRound++;
     this.mistakes++;
     this.streak = 0;
+    setMusicIntensity(1);
     this.monster.setMood('confused', 1.3);
     if (opts.replay === false) return;
     await wait(450);
@@ -1092,18 +1166,24 @@ class PhonicsGame {
 
   private bindCard(card: HTMLButtonElement, key: string, index: number): void {
     card.addEventListener('pointerenter', (e) => {
-      if (!this.locked && !this.drag && e.pointerType === 'mouse') sfx.sfxHover(index);
+      if (!this.locked && !this.drag && e.pointerType === 'mouse') sfx.sfxHover(index, e.clientX);
     });
     card.addEventListener('pointermove', (e) => {
       if (this.drag?.card === card) return this.onDragMove(e);
       if (e.pointerType !== 'mouse' || this.locked) return;
       const r = card.getBoundingClientRect();
-      card.style.setProperty('--ry', `${((e.clientX - r.left) / r.width - 0.5) * 16}deg`);
-      card.style.setProperty('--rx', `${-((e.clientY - r.top) / r.height - 0.5) * 16}deg`);
+      const nx = (e.clientX - r.left) / r.width;
+      const ny = (e.clientY - r.top) / r.height;
+      card.style.setProperty('--ry', `${(nx - 0.5) * 16}deg`);
+      card.style.setProperty('--rx', `${-(ny - 0.5) * 16}deg`);
+      card.style.setProperty('--mx', `${(nx * 100).toFixed(1)}%`);
+      card.style.setProperty('--my', `${(ny * 100).toFixed(1)}%`);
     });
     card.addEventListener('pointerleave', () => {
       card.style.setProperty('--rx', '0deg');
       card.style.setProperty('--ry', '0deg');
+      card.style.setProperty('--mx', '50%');
+      card.style.setProperty('--my', '20%');
     });
     card.addEventListener('pointerdown', (e) => {
       if (this.locked || this.drag || e.button > 0) return;
@@ -1189,7 +1269,9 @@ class PhonicsGame {
   }
 
   private springBack(card: HTMLButtonElement): void {
-    sfx.sfxDrop();
+    const r = card.getBoundingClientRect();
+    sfx.sfxDrop(r.left + r.width / 2);
+    this.fx.dustPuff(r.left + r.width / 2, r.bottom - 6, 0.5);
     const from = card.style.translate || '0px 0px';
     const rot = card.style.rotate || '0deg';
     card.classList.remove('is-dragging');
@@ -1217,10 +1299,11 @@ class PhonicsGame {
     card.style.setProperty('--rx', '0deg');
     card.style.setProperty('--ry', '0deg');
     const mouth = this.monster.getMouthScreenPosition();
-    const dx = mouth.x - (home.left + home.width / 2);
+    const startX = home.left + home.width / 2;
+    const dx = mouth.x - startX;
     const dy = mouth.y - (home.top + home.height / 2);
     this.monster.setHunger(1, mouth.x, mouth.y + 40);
-    sfx.sfxWhoosh(0.38);
+    sfx.sfxWhoosh(0.38, startX, mouth.x);
     const anim = card.animate(
       [
         { translate: `${fx}px ${fy}px`, rotate: fromR, scale: fromS },
@@ -1256,8 +1339,9 @@ class PhonicsGame {
     this.markCorrect();
 
     this.monster.setMood('chewing', 0.85);
-    sfx.sfxMunch();
-    this.shake(4);
+    sfx.sfxMunch(mouth.x);
+    this.shake(5);
+    this.juiceImpact(0.38, mouth.x, mouth.y, item.accent, 16);
     for (let i = 0; i < 3; i++) setTimeout(() => this.fx.crumbs(mouth.x, mouth.y, item.accent, 8), i * 170);
     await wait(620);
     this.monster.gulp();
@@ -1269,8 +1353,10 @@ class PhonicsGame {
       this.burpedLast = true;
       this.monster.setMood('burp', 0.8);
       sfx.sfxBurp();
+      this.fx.spitPuff(mouth.x, mouth.y, 1);
       this.fx.text(mouth.x, mouth.y - this.monster.getUnitPx() * 1.4, 'BURP!', '#9be15d', 58);
-      this.shake(6);
+      this.shake(7);
+      this.juiceImpact(0.55, mouth.x, mouth.y, '#9be15d', 18);
       await wait(850);
       if (!this.alive(run)) return;
       this.monster.setMood('speaking', 2);
@@ -1282,7 +1368,8 @@ class PhonicsGame {
 
     this.monster.setMood('happy', 1.8);
     sfx.sfxCorrect(this.streak);
-    this.fx.burst(mouth.x, mouth.y - 20, item.accent, 34);
+    this.fx.burst(mouth.x, mouth.y - 20, item.accent, 36);
+    this.juiceImpact(0.5, mouth.x, mouth.y - 20, item.accent, 26);
     this.fx.hearts(mouth.x, mouth.y - 40, 4);
     this.fx.text(mouth.x, mouth.y - this.monster.getUnitPx() * 1.6, pick(PRAISE), item.accent, 52);
     this.showStreak();
@@ -1301,11 +1388,15 @@ class PhonicsGame {
 
   private async feedWrong(run: number, card: HTMLButtonElement, pos: { dx: number; dy: number }): Promise<void> {
     const mouth = this.monster.getMouthScreenPosition();
+    const home = (card.parentElement as HTMLElement).getBoundingClientRect();
+    const homeX = home.left + home.width / 2;
     this.monster.setMood('yuck', 0.75);
-    sfx.sfxWrong();
+    sfx.sfxWrong(mouth.x);
     await wait(260);
-    sfx.sfxSpit();
+    sfx.sfxSpit(mouth.x, homeX);
+    this.fx.spitPuff(mouth.x, mouth.y, homeX - mouth.x);
     this.fx.crumbs(mouth.x, mouth.y, '#bfe9ff', 6);
+    this.scene.triggerImpact(0.22, '#9ee7ff');
     card.getAnimations().forEach((a) => a.cancel());
     const back = card.animate(
       [
@@ -1392,6 +1483,8 @@ class PhonicsGame {
     t.classList.remove('lit');
     void t.offsetWidth;
     t.classList.add('lit');
+    const r = t.getBoundingClientRect();
+    this.fx.magicRing(r.left + r.width / 2, r.top + r.height / 2, t.style.getPropertyValue('--accent') || '#ffd43b');
     setTimeout(() => t.classList.remove('lit'), 650);
   }
 
@@ -1461,7 +1554,8 @@ class PhonicsGame {
     this.clearIdle();
     const need = this.word.letters[this.buildIndex];
     if (letter !== need) {
-      sfx.sfxBonk();
+      const tr = tile.getBoundingClientRect();
+      sfx.sfxBonk(tr.left + tr.width / 2);
       tile.classList.remove('nope');
       void tile.offsetWidth;
       tile.classList.add('nope');
@@ -1529,7 +1623,10 @@ class PhonicsGame {
     const pic = this.el.playfield.querySelector<HTMLElement>('#build-pic')!;
     const pr = pic.getBoundingClientRect();
     sfx.sfxCorrect(this.streak);
-    this.fx.burst(pr.left + pr.width / 2, pr.top + pr.height / 2, accent, 30);
+    const px = pr.left + pr.width / 2;
+    const py = pr.top + pr.height / 2;
+    this.fx.burst(px, py, accent, 34);
+    this.juiceImpact(0.52, px, py, accent, 24);
 
     // Blend it: each slot lights as its sound plays, then the whole word
     this.monster.setMood('speaking', 6);
@@ -1564,7 +1661,9 @@ class PhonicsGame {
     this.monster.setHunger(0);
     pic.style.opacity = '0';
     this.monster.setMood('chewing', 0.8);
-    sfx.sfxMunch();
+    sfx.sfxMunch(mouth.x);
+    this.shake(5);
+    this.juiceImpact(0.4, mouth.x, mouth.y, accent, 18);
     for (let i = 0; i < 3; i++) setTimeout(() => this.fx.crumbs(mouth.x, mouth.y, accent, 7), i * 170);
     this.fx.text(mouth.x, mouth.y - this.monster.getUnitPx() * 1.6, pick(PRAISE), accent, 52);
     this.showStreak();
@@ -1660,9 +1759,13 @@ class PhonicsGame {
     void egg.offsetWidth;
     egg.classList.add('crack-shake');
     if (this.hatchStage < 3) {
-      sfx.sfxCrack(this.hatchStage);
-      this.fx.crumbs(r.left + r.width / 2, r.top + r.height * 0.45, '#ffffff', 5);
-      this.fx.text(r.left + r.width / 2, r.top - 10, this.hatchStage === 1 ? 'Tap!' : 'Tap tap!', LETTER_ITEMS[this.target].accent, 34);
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height * 0.45;
+      sfx.sfxCrack(this.hatchStage, cx);
+      this.fx.crumbs(cx, cy, '#ffffff', 6);
+      this.fx.magicRing(cx, cy, LETTER_ITEMS[this.target].accent);
+      this.scene.triggerImpact(0.18 + this.hatchStage * 0.08, LETTER_ITEMS[this.target].accent);
+      this.fx.text(cx, r.top - 10, this.hatchStage === 1 ? 'Tap!' : 'Tap tap!', LETTER_ITEMS[this.target].accent, 34);
       // Keep things moving if the child waits
       this.hatchTimer = window.setTimeout(() => this.crackEgg(run), 2600);
     } else {
@@ -1677,7 +1780,9 @@ class PhonicsGame {
     const r = egg.getBoundingClientRect();
     const cx = r.left + r.width / 2;
     const cy = r.top + r.height * 0.35;
-    this.fx.burst(cx, cy, item.accent, 34);
+    this.fx.burst(cx, cy, item.accent, 36);
+    this.juiceImpact(0.62, cx, cy, item.accent, 30);
+    this.shake(6);
     this.fx.crumbs(cx, cy, '#ffffff', 12);
     this.fx.text(cx, r.top - 20, pick(PRAISE), item.accent, 48);
     this.monster.setMood('happy', 2);
@@ -1816,15 +1921,16 @@ class PhonicsGame {
       this.bubbles = this.bubbles.filter((x) => x !== b);
     }, 320);
     this.pops++;
-    sfx.sfxBubblePop(1 + this.pops * 0.15);
-    this.fx.burst(cx, cy, item.accent, 16);
+    sfx.sfxBubblePop(1 + this.pops * 0.15, cx);
+    this.fx.burst(cx, cy, item.accent, 18);
+    this.juiceImpact(0.24, cx, cy, item.accent, 14);
     this.renderPopCounter();
     const mouth = this.monster.getMouthScreenPosition();
     this.monster.setHunger(0.8, cx, cy);
     this.fx.flyLetter(cx, cy, mouth.x, mouth.y, b.letter, item.accent, () => {
       this.monster.setHunger(0);
       this.monster.setMood('chewing', 0.45);
-      sfx.sfxNom();
+      sfx.sfxNom(mouth.x);
       this.fx.crumbs(mouth.x, mouth.y, item.accent, 5);
     });
     if (this.pops < this.popsNeeded) return;
@@ -1867,8 +1973,10 @@ class PhonicsGame {
     this.renderHud();
 
     this.monster.setMood('dance', 6);
+    setMusicIntensity(2);
     this.scene.celebrate(6);
-    this.fx.confetti(3500);
+    this.fx.confetti(5000);
+    this.juiceImpact(0.8, window.innerWidth / 2, window.innerHeight * 0.45, '#ffd43b', 42);
     sfx.sfxFanfare();
     sayLine('didit');
     await wait(1300);
@@ -1943,7 +2051,10 @@ class PhonicsGame {
     sfx.sfxChestOpen();
     const r = chest.getBoundingClientRect();
     await wait(450);
-    this.fx.burst(r.left + r.width / 2, r.top + r.height * 0.3, '#ffd43b', 40);
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height * 0.3;
+    this.fx.burst(cx, cy, '#ffd43b', 46);
+    this.juiceImpact(0.85, cx, cy, '#ffd43b', 38);
     const reward = this.el.modal.querySelector<HTMLElement>('#reward');
     if (!reward) return;
     if (prize.kind === 'hat') {

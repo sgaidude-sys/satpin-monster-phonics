@@ -52,6 +52,19 @@ let timer: number | null = null;
 let nextTime = 0;
 let step = 0;
 let musicOut: GainNode | null = null;
+let musicIntensity = 1; // 0 = map/calm, 1 = normal play, 2 = streak/celebration sparkle
+let musicWorld = 0;
+
+// Subtle semitone shift per world so each biome has its own harmonic colour
+const WORLD_TRANSPOSE = [0, 2, -2, -5];
+
+export function setMusicIntensity(level: 0 | 1 | 2): void {
+  musicIntensity = level;
+}
+
+export function setMusicWorld(worldIndex: number): void {
+  musicWorld = Math.max(0, Math.min(WORLD_TRANSPOSE.length - 1, worldIndex));
+}
 
 function kalimba(midi: number, t: number, len: number, gain: number, pan: number): void {
   const ctx = engine.ctx!;
@@ -154,27 +167,36 @@ function scheduleStep(s: number, t: number): void {
   const inBar = s % STEPS_PER_BAR;
   const chord = PROGRESSION[bar];
   const bSection = bar >= 8;
+  const shift = WORLD_TRANSPOSE[musicWorld] ?? 0;
 
-  // Rhythm section
-  if (inBar === 0 || inBar === 4) kick(t, 0.32);
-  if (inBar % 2 === 1) shaker(t, 0.05);
-  if (inBar === 2 || inBar === 6) shaker(t, 0.025);
+  // Rhythm section (softer on map / richer during gameplay & streaks)
+  const rhythmScale = musicIntensity === 0 ? 0.65 : 1;
+  if (inBar === 0 || inBar === 4) kick(t, 0.32 * rhythmScale);
+  if (inBar % 2 === 1) shaker(t, 0.05 * rhythmScale);
+  if (inBar === 2 || inBar === 6) shaker(t, 0.025 * rhythmScale);
 
-  if (inBar === 0) bass(chord.root, t, 0.32);
-  if (inBar === 4) bass(chord.root + 7, t, 0.24);
-  if (inBar === 6 && bar % 2 === 1) bass(chord.root + 12, t, 0.18);
+  if (inBar === 0) bass(chord.root + shift, t, 0.32);
+  if (inBar === 4) bass(chord.root + shift + 7, t, 0.24);
+  if (inBar === 6 && bar % 2 === 1) bass(chord.root + shift + 12, t, 0.18);
 
-  if (inBar === 2 || inBar === 6) chordStab(chord.tones, t, 0.035);
+  if (inBar === 2 || inBar === 6) {
+    chordStab(
+      chord.tones.map((n) => n + shift),
+      t,
+      0.035
+    );
+  }
 
-  // Twinkly arpeggio in the B section
-  if (bSection && inBar % 2 === 0) {
-    const tone = chord.tones[(inBar / 2) % 3] + 24;
-    kalimba(tone, t, 1, 0.025, 0.5);
+  // Twinkly arpeggio in B section, Starry Hills, or high-intensity streak/celebration
+  if ((bSection || musicWorld === 3 || musicIntensity >= 2) && inBar % 2 === 0) {
+    const tone = chord.tones[(inBar / 2) % 3] + shift + 24;
+    const g = musicIntensity >= 2 ? 0.042 : 0.026;
+    kalimba(tone, t, 1, g, 0.5);
   }
 
   for (const [b, st, midi, len] of MELODY) {
     if (b === bar && st === inBar) {
-      kalimba(midi, t, len, 0.11, -0.12);
+      kalimba(midi + shift, t, len, 0.11, -0.12);
     }
   }
 }
