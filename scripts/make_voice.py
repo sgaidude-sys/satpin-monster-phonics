@@ -2,32 +2,24 @@
 Builds every voice clip for Munchy's Phonics Feast using Kokoro-82M (kokoro-onnx):
 
   * Teacher voice: `af_heart` — Kokoro's flagship Grade-A warm, crystal-clear
-    voice for all 23 pure letter sounds, short blending sounds, and 52+ words.
+    voice for all 23 pure letter sounds, short blending sounds, and words.
   * Munchy voice:  custom blended Kokoro embedding
     (0.55 * af_bella + 0.30 * af_sky + 0.15 * am_puck) — warm, playful,
     expressive monster buddy voice for all 24 character lines.
 
-Because pure phonics sounds can't simply be typed as isolated letters into TTS,
-each sound is extracted directly from uncompressed 24 kHz Kokoro float32 speech
-using neutral /ʌ/ carrier words for stops & glides (eliminating unwanted vowel
-colouration) and clean steady-state windows for vowels, fricatives & sonorants:
-
-  hiss_final   s, f: unvoiced final fricative lengthened with natural noise grains
-  voiced_fric  v, z: pure final voiced fricative tail (from 'love', 'buzz')
-  sonorant     m, n, l: steady nasal/lateral tail after vowel decay
-  vowel        a, e, i, o, u: pure steady vowel core before consonant transition
-  stop         t, p, k, h: crisp aspirated burst from neutral /ʌ/ carriers
-  vstop        b, d, g, j: clean voiced release from neutral /ʌ/ carriers
-  glide        r, w, y: clean glide onset from neutral /ʌ/ carriers
+Zero-hallucination carrier extraction:
+  Single-word 3-4 token prompts can trigger short-sequence prefix artifacts in
+  Kokoro-ONNX. Every phoneme carrier word is therefore rendered inside a full
+  single-pass carrier phrase ("Ready now... <word>") via `_create_audio` and
+  sliced cleanly after the natural ellipsis silence gap before extracting the
+  pure target phoneme from uncompressed 24 kHz float32 audio.
 
 Two phoneme sets are written:
-  public/audio/{s}.mp3        teaching version (long sounds held, stops said twice)
+  public/audio/{s}.mp3        teaching version (continuants held; short vowels,
+                              stops & glides clearly spoken twice: "a … a", "t … t")
   public/audio/blend/{s}.mp3  short single version used when blending "c-a-t"
 
 Requires: pip install kokoro-onnx numpy ; ffmpeg on PATH.
-Auto-discovers cached HuggingFace `fastrtc/kokoro-onnx` model files, or pass
---model <path> and --voices <path>.
-
 Run from repo root:
   python scripts/make_voice.py            # rebuild everything
   python scripts/make_voice.py sounds     # just the 23 letter sounds
@@ -90,31 +82,31 @@ LINES = {
     "newsticker": "A new sticker!",
 }
 
-# sound -> (method, carrier word, teach_param, blend_param)
+# sound -> (method, carrier word, p1, p2)
 SOUNDS = {
-    "s": ("hiss_final", "hiss.", 0.85, 0.38),
+    "s": ("hiss_final", "hiss.", 0.84, 0.36),
     "f": ("hiss_final", "off.", 0.72, 0.34),
-    "v": ("voiced_fric", "love.", 0.56, 0.28),
-    "z": ("voiced_fric", "buzz.", 0.64, 0.32),
-    "m": ("sonorant", "hum.", 0.62, 0.30),
-    "n": ("sonorant", "sun.", 0.62, 0.30),
-    "l": ("sonorant", "lull.", 0.56, 0.28),
-    "a": ("vowel", "add.", 0.38, 0.22),
-    "e": ("vowel", "egg.", 0.38, 0.22),
-    "i": ("vowel", "if.", 0.34, 0.20),
-    "o": ("vowel", "odd.", 0.38, 0.22),
-    "u": ("vowel", "up.", 0.36, 0.22),
+    "v": ("voiced_fric_init", "very.", 0.56, 0.28),
+    "z": ("voiced_fric_init", "zebra.", 0.64, 0.32),
+    "m": ("sonorant", "hum.", 0.52, 0.28),
+    "n": ("sonorant", "sun.", 0.52, 0.28),
+    "l": ("sonorant", "lull.", 0.48, 0.26),
+    "a": ("vowel", "apple.", 0.28, 0.19),
+    "e": ("vowel", "egg.", 0.28, 0.19),
+    "i": ("vowel", "igloo.", 0.26, 0.18),
+    "o": ("vowel", "octopus.", 0.28, 0.19),
+    "u": ("vowel", "up.", 0.26, 0.18),
     "t": ("stop", "tub.", 0.068, 0.0),
     "p": ("stop", "pup.", 0.068, 0.0),
-    "k": ("stop", "cup.", 0.072, 0.0),
+    "k": ("stop", "cup.", 0.070, 0.0),
     "h": ("stop", "hug.", 0.095, 0.0),
-    "b": ("vstop", "but.", 0.115, 0.0),
-    "d": ("vstop", "dug.", 0.115, 0.0),
-    "g": ("vstop", "gum.", 0.115, 0.0),
-    "j": ("vstop", "jug.", 0.145, 0.0),
-    "r": ("glide", "rug.", 0.15, 0.0),
-    "w": ("glide", "won.", 0.14, 0.0),
-    "y": ("glide", "yum.", 0.14, 0.0),
+    "b": ("vstop", "but.", 0.095, 0.0),
+    "d": ("vstop", "dug.", 0.095, 0.0),
+    "g": ("vstop", "gum.", 0.095, 0.0),
+    "j": ("vstop", "jug.", 0.130, 0.0),
+    "r": ("glide", "rug.", 0.145, 0.0),
+    "w": ("glide", "won.", 0.140, 0.0),
+    "y": ("glide", "yum.", 0.135, 0.0),
 }
 
 
@@ -136,6 +128,35 @@ def find_kokoro_assets(model_arg: str | None, voices_arg: str | None) -> tuple[P
         "Could not find kokoro-v1.0.onnx and voices-v1.0.bin. "
         "Download fastrtc/kokoro-onnx or pass --model and --voices."
     )
+
+
+def speak_isolated_word(kokoro: kokoro_onnx.Kokoro, word: str, voice: np.ndarray, speed=0.78) -> np.ndarray:
+    """
+    Renders 'Ready now... <word>' in ONE single ONNX pass via `_create_audio`
+    so Kokoro has >=18 tokens (preventing short-token leading-word hallucinations),
+    then slices cleanly after the longest silence gap in the middle of the clip.
+    """
+    ph = kokoro.tokenizer.phonemize(f"Ready now... {word}", lang="en-us")
+    x, _ = kokoro._create_audio(ph, voice, speed)
+    n = int(SR * 0.015)
+    h = int(SR * 0.005)
+    rms = np.array([np.sqrt(np.mean(x[i:i + n] ** 2)) for i in range(0, len(x) - n, h)])
+    pk = float(rms.max()) if len(rms) else 1.0
+    silent = rms < pk * 0.03
+    lo = int(len(rms) * 0.25)
+    hi = int(len(rms) * 0.80)
+    best_len, best_end = 0, lo
+    run = 0
+    for idx in range(lo, hi):
+        if silent[idx]:
+            run += 1
+            if run > best_len:
+                best_len = run
+                best_end = idx
+        else:
+            run = 0
+    start_sample = max(0, best_end * h - int(SR * 0.01))
+    return x[start_sample:]
 
 
 def write_wav(x: np.ndarray, path: Path) -> None:
@@ -169,11 +190,11 @@ def peak_of(fs):
 
 
 def onset(fs, pk):
-    return next(f["t"] for f in fs if f["rms"] > pk * 0.04)
+    return next(f["t"] for f in fs if f["rms"] > pk * 0.05)
 
 
 def offset(fs, pk):
-    return next(f["t"] for f in reversed(fs) if f["rms"] > pk * 0.04)
+    return next(f["t"] for f in reversed(fs) if f["rms"] > pk * 0.05)
 
 
 def seg(x: np.ndarray, t0: float, t1: float) -> np.ndarray:
@@ -197,16 +218,39 @@ def cut_hiss_final(x: np.ndarray) -> np.ndarray:
     return seg(x, t + 0.015, end)
 
 
-def cut_voiced_fric_final(x: np.ndarray) -> np.ndarray:
-    """Strictly isolate the pure final /v/ or /z/ tail well past vowel decay."""
+def cut_voiced_fric_init(x: np.ndarray) -> np.ndarray:
+    """Isolate initial fully-voiced /v/ ('very') or /z/ ('zebra') cleanly before the vowel."""
     fs = frames(x)
     pk = peak_of(fs)
-    end = offset(fs, pk)
-    pk_t = max(fs, key=lambda f: f["rms"])["t"]
-    # Wait until RMS drops below 20% of vowel peak so zero preceding vowel remains
-    t = next((f["t"] for f in fs if f["t"] > pk_t + 0.12 and f["rms"] < pk * 0.2), end - 0.14)
-    start = max(t + 0.03, end - 0.16)
-    return seg(x, start, max(start + 0.08, end - 0.015))
+    t0 = onset(fs, pk)
+    # Vowel starts when RMS surges past 52% of peak and mid/low formant energy spikes
+    t1 = next((f["t"] for f in fs if f["t"] > t0 + 0.045 and f["rms"] > pk * 0.52 and f["cen"] < 2600), t0 + 0.13)
+    return seg(x, t0 + 0.01, max(t0 + 0.075, t1 - 0.015))
+
+
+def loop_voiced(x: np.ndarray, target: float) -> np.ndarray:
+    """Smoothly extends a steady voiced continuant (m, n, l, v, z) with Hann-windowed pitch-friendly crossfades."""
+    cur = len(x) / SR
+    if cur >= target:
+        return x[: int(target * SR)]
+    n = len(x)
+    core = x[int(n * 0.18): int(n * 0.85)] if n > SR * 0.08 else x
+    seg_len = len(core)
+    ov = max(1, int(seg_len * 0.42))
+    hop = max(1, seg_len - ov)
+    L = int(SR * target)
+    out = np.zeros(L + seg_len, dtype=np.float32)
+    win = np.ones(seg_len, dtype=np.float32)
+    win[:ov] = np.linspace(0, 1, ov, dtype=np.float32)
+    win[-ov:] = np.linspace(1, 0, ov, dtype=np.float32)
+    # Keep natural start
+    head = min(int(n * 0.25), L)
+    out[:head] = x[:head]
+    pos = max(0, head - ov // 2)
+    while pos < L:
+        out[pos:pos + seg_len] += core * win
+        pos += hop
+    return out[:L]
 
 
 def cut_final_sonorant(x: np.ndarray) -> np.ndarray:
@@ -219,13 +263,18 @@ def cut_final_sonorant(x: np.ndarray) -> np.ndarray:
 
 
 def cut_pure_vowel(x: np.ndarray) -> np.ndarray:
+    """Isolate the pure stressed initial vowel core BEFORE any consonant transition."""
     fs = frames(x)
     pk = peak_of(fs)
     t0 = onset(fs, pk)
-    pk_t = max(fs, key=lambda f: f["rms"])["t"]
-    t1 = next((f["t"] for f in fs if f["t"] > pk_t + 0.03 and (f["rms"] < pk * 0.48 or f["cen"] > 2400)), pk_t + 0.15)
-    t_end = min(t1 - 0.02, t0 + 0.22)
-    return seg(x, t0 + 0.015, max(t0 + 0.08, t_end))
+    first_chunk = [f for f in fs if t0 <= f["t"] <= t0 + 0.24]
+    v_pk = max(first_chunk, key=lambda f: f["rms"])
+    t1 = next(
+        (f["t"] for f in fs if f["t"] > v_pk["t"] + 0.025 and (f["rms"] < v_pk["rms"] * 0.42 or f["cen"] > 2600)),
+        v_pk["t"] + 0.13,
+    )
+    end = min(t1 - 0.015, t0 + 0.195)
+    return seg(x, t0 + 0.012, max(t0 + 0.085, end))
 
 
 def cut_unvoiced_stop(x: np.ndarray, dur=0.068) -> np.ndarray:
@@ -237,14 +286,14 @@ def cut_unvoiced_stop(x: np.ndarray, dur=0.068) -> np.ndarray:
     return seg(x, t0 - 0.003, max(t0 + 0.048, end))
 
 
-def cut_voiced_stop(x: np.ndarray, keep=0.115) -> np.ndarray:
+def cut_voiced_stop(x: np.ndarray, keep=0.095) -> np.ndarray:
     fs = frames(x)
     pk = peak_of(fs)
     t0 = onset(fs, pk)
     return seg(x, t0 - 0.003, t0 + keep)
 
 
-def cut_glide(x: np.ndarray, keep=0.145) -> np.ndarray:
+def cut_glide(x: np.ndarray, keep=0.14) -> np.ndarray:
     fs = frames(x)
     pk = peak_of(fs)
     t0 = onset(fs, pk)
@@ -275,7 +324,7 @@ def grains(x: np.ndarray, target: float, seed: int) -> np.ndarray:
 
 
 def stretch(x: np.ndarray, factor: float, tmp: Path) -> np.ndarray:
-    factor = min(factor, 1.75)
+    factor = min(factor, 1.65)
     if factor <= 1.04:
         return x
     src, dst = tmp / "st_in.wav", tmp / "st_out.wav"
@@ -333,27 +382,29 @@ def encode(x: np.ndarray, path: Path, tmp: Path, pre=0.015, post=0.045) -> None:
 
 def build_sound(sound: str, cx: np.ndarray, tmp: Path, report: dict) -> tuple[np.ndarray, np.ndarray]:
     method, _, p1, p2 = SOUNDS[sound]
-    gap = np.zeros(int(SR * 0.34), dtype=np.float32)
+    gap = np.zeros(int(SR * 0.30), dtype=np.float32)
 
     if method == "hiss_final":
         raw = cut_hiss_final(cx)
         teach = fade(grains(raw, p1, 1), 0.04, 0.14)
         blend = fade(grains(raw, p2, 2), 0.02, 0.08)
         rms = 0.095
-    elif method == "voiced_fric":
-        raw = cut_voiced_fric_final(cx)
-        teach = fade(grains(raw, p1, 3), 0.04, 0.14)
-        blend = fade(grains(raw, p2, 4), 0.025, 0.08)
-        rms = 0.125
+    elif method == "voiced_fric_init":
+        raw = cut_voiced_fric_init(cx)
+        teach = fade(loop_voiced(raw, p1), 0.035, 0.12)
+        blend = fade(loop_voiced(raw, p2), 0.02, 0.07)
+        rms = 0.13
     elif method == "sonorant":
         raw = cut_final_sonorant(cx)
-        teach = fade(fit(raw, p1, tmp), 0.03, 0.11)
-        blend = fade(fit(raw, p2, tmp), 0.02, 0.07)
+        teach = fade(loop_voiced(raw, p1), 0.03, 0.11)
+        blend = fade(loop_voiced(raw, p2), 0.02, 0.07)
         rms = 0.15
     elif method == "vowel":
         raw = cut_pure_vowel(cx)
-        teach = fade(fit(raw, p1, tmp), 0.02, 0.095)
-        blend = fade(fit(raw, p2, tmp), 0.015, 0.06)
+        one = fade(fit(raw, p1, tmp), 0.015, 0.075)
+        # Short vowels are clearest for 4-year-olds spoken crisply twice ("a … a") in teach mode
+        teach = np.concatenate([one, np.zeros(int(SR * 0.24), dtype=np.float32), one])
+        blend = fade(fit(raw, p2, tmp), 0.012, 0.055)
         rms = 0.16
     elif method == "stop":
         raw = cut_unvoiced_stop(cx, p1)
@@ -363,14 +414,14 @@ def build_sound(sound: str, cx: np.ndarray, tmp: Path, report: dict) -> tuple[np
         rms = 0.13
     elif method == "vstop":
         raw = cut_voiced_stop(cx, p1)
-        one = fade(raw, 0.003, 0.045)
+        one = fade(raw, 0.003, 0.04)
         teach = np.concatenate([one, gap, one])
         blend = one
         rms = 0.14
     else:  # glide
         raw = cut_glide(cx, p1)
-        one_teach = fade(fit(raw, p1 * 1.4, tmp), 0.012, 0.065)
-        teach = np.concatenate([one_teach, np.zeros(int(SR * 0.3), dtype=np.float32), one_teach])
+        one_teach = fade(fit(raw, p1 * 1.35, tmp), 0.012, 0.06)
+        teach = np.concatenate([one_teach, gap, one_teach])
         blend = fade(raw, 0.01, 0.05)
         rms = 0.14
 
@@ -409,9 +460,9 @@ def main() -> None:
         tmp = Path(td)
 
         if not only or "sounds" in only:
-            print("Rendering 23 pure letter sounds + blend set...", file=sys.stderr)
+            print("Rendering 23 pure letter sounds + blend set via zero-hallucination carrier phrases...", file=sys.stderr)
             for sound, (_, word, _, _) in SOUNDS.items():
-                cx, _ = kokoro.create(word, voice=teacher_voice, speed=0.66)
+                cx = speak_isolated_word(kokoro, word, teacher_voice, speed=0.78)
                 teach, blend = build_sound(sound, cx, tmp, report)
                 encode(teach, OUT / f"{sound}.mp3", tmp)
                 encode(blend, OUT / "blend" / f"{sound}.mp3", tmp, pre=0.01, post=0.02)

@@ -20,14 +20,14 @@ Files:
 - `words/` – keywords (`snake`, `cat`…), blending words (`pin`, `sun`, `jet`…) and hints (`like_snake`).
 - `lines/` – Munchy's chatter. `lines/manifest.json` lists the text.
 
-How the pure sounds are extracted directly from uncompressed 24 kHz Kokoro float32 speech:
+How the pure sounds are extracted directly from uncompressed 24 kHz Kokoro float32 speech (rendered inside a single-pass `"Ready now... <word>"` carrier phrase and sliced cleanly after the ellipsis silence gap to prevent short-token prefix hallucinations):
 
 | kind | letters | source |
 | --- | --- | --- |
 | hiss_final | s f | unvoiced final fricative (`hiss`, `off`) lengthened with natural noise grains |
-| voiced_fric | v z | clean final voiced fricative tail (`love`, `buzz`) |
-| sonorant | m n l | steady nasal/lateral tail after vowel decay (`hum`, `sun`, `lull`) |
-| vowel | a e i o u | pure steady vowel core before consonant closure (`add`, `egg`, `if`, `odd`, `up`) |
+| voiced_fric_init | v z | initial fully-voiced fricative (`very`, `zebra`) extended with smooth crossfade looping |
+| sonorant | m n l | steady nasal/lateral tail (`hum`, `sun`, `lull`) extended cleanly |
+| vowel | a e i o u | pure steady initial vowel core (`apple`, `egg`, `igloo`, `octopus`, `up`) — spoken twice (`a … a`) in teach mode, once in blend mode |
 | stop / vstop | t p k h b d g j | crisp burst/release from neutral `/ʌ/` carriers (`tub`, `pup`, `cup`, `hug`, `but`, `dug`, `gum`, `jug`) |
 | glide | r w y | clean glide onset from neutral `/ʌ/` carriers (`rug`, `won`, `yum`) |
 
